@@ -494,7 +494,6 @@ CCJ,US,Cameco Corporation Common Stock,NYSE,stock
 CCK,US,Crown Holdings Inc.,NYSE,stock
 CCL,US,Carnival Corporation Ltd. Common Shares,NYSE,stock
 CCM,US,Concord Medical Services Holdings Limited American Depositary Shares (Each represents thirty (30) Class A ordinary shares),NYSE,stock
-CCO,US,Clear Channel Outdoor Holdings Inc. Common Stock,NYSE,stock
 CCS,US,Century Communities Inc. Common Stock,NYSE,stock
 CCU,US,Compania Cervecerias Unidas S.A. Common Stock,NYSE,stock
 CCZ,US,Comcast Holdings ZONES,NYSE,stock
@@ -845,7 +844,6 @@ EMR,US,Emerson Electric Company Common Stock,NYSE,stock
 ENB,US,Enbridge Inc Common Stock,NYSE,stock
 ENHA,US,Enhanced Group Inc. Class A Common Stock,NYSE,stock
 ENIC,US,Enel Chile S.A. American Depositary Shares (Each representing 50 shares of Common Stock),NYSE,stock
-ENJ,US,Entergy New Orleans LLC First Mortgage Bonds 5.0% Series due December 1 2052,NYSE,stock
 ENO,US,Entergy New Orleans LLC First Mortgage Bonds 5.50% Series due April 1 2066,NYSE,stock
 ENOV,US,Enovis Corporation Common Stock,NYSE,stock
 ENR,US,Energizer Holdings Inc. Common Stock,NYSE,stock
@@ -1069,8 +1067,8 @@ GIL,US,Gildan Activewear Inc. Class A Sub. Vot. Common Stock,NYSE,stock
 GIS,US,General Mills Inc. Common Stock,NYSE,stock
 GJH,US,Synthetic Fixed-Income Securities Inc 6.375% (STRATS) Cl A-1,NYSE,stock
 GJP,US,Synthetic Fixed-Income Securities Inc. on behalf of STRATS (SM) Trust for Dominion Resources Inc. Securities Series 2005-6 Floating Rate Structured Repackaged Asset-Backed Trust Securities (STRATS) Certificates,NYSE,stock
+GJR,US,Synthetic Fixed-Income Securities Inc. STRATS Trust for Procter&Gamble Securities Series 2006-1,NYSE,stock
 GJS,US,Goldman Sachs Group Securities STRATS Trust for Goldman Sachs Group Securities Series 2006-2,NYSE,stock
-GJT,US,Synthetic Fixed-Income Securities Inc. Floating Rate Structured Repackaged Asset-Backed Trust Securities Certificates Series 2006-3,NYSE,stock
 GKOS,US,Glaukos Corporation Common Stock,NYSE,stock
 GL,US,Globe Life Inc. Common Stock,NYSE,stock
 GL^D,US,Globe Life Inc. 4.25% Junior Subordinated Debentures due 2061,NYSE,stock
@@ -1231,7 +1229,6 @@ HY,US,Hyster-Yale Inc. Class A common stock,NYSE,stock
 HYI,US,Western Asset High Yield Opportunity Fund Inc. Common Stock,NYSE,stock
 HYT,US,Blackrock Corporate High Yield Fund Inc. Common Stock,NYSE,stock
 HZO,US,MarineMax Inc.  (FL) Common Stock,NYSE,stock
-IAE,US,Voya Asia Pacific High Dividend Equity Income Fund ING Asia Pacific High Dividend Equity Income Fund Common Shares of Beneficial Interest,NYSE,stock
 IAG,US,Iamgold Corporation Ordinary Shares,NYSE,stock
 IBM,US,International Business Machines Corporation Common Stock,NYSE,stock
 IBN,US,ICICI Bank Limited Common Stock,NYSE,stock
@@ -1252,7 +1249,6 @@ IGD,US,Voya Global Equity Dividend and Premium Opportunity Fund,NYSE,stock
 IGI,US,Western Asset Investment Grade Opportunity Trust Inc. Common Stock,NYSE,stock
 IGR,US,CBRE Global Real Estate Income Fund Common Shares of Beneficial Interest,NYSE,stock
 IH,US,iHuman Inc. American depositary shares each representing five Class A ordinary shares,NYSE,stock
-IHD,US,Voya Emerging Markets High Income Dividend Equity Fund Common Shares,NYSE,stock
 IHG,US,Intercontinental Hotels Group American Depositary Shares (Each representing one Ordinary Share),NYSE,stock
 IHS,US,IHS Holding Limited Ordinary Shares,NYSE,stock
 IIF,US,Morgan Stanley India Investment Fund Inc. Common Stock,NYSE,stock
@@ -1417,7 +1413,7 @@ LANV,US,Lanvin Group Holdings Limited Ordinary Shares,NYSE,stock
 LAR,US,Lithium Argentina AG Common Shares,NYSE,stock
 LAW,US,CS Disco Inc. Common Stock,NYSE,stock
 LAZ,US,Lazard Inc. Common Stock,NYSE,stock
-LB,US,LandBridge Company LLC Class A Shares Representing Limited Liability Company Interests,NYSE,stock
+LB,US,LandBridge Corporation Class A Common Stock,NYSE,stock
 LBRT,US,Liberty Energy Inc. Class A common stock,NYSE,stock
 LCII,US,LCI Industries,NYSE,stock
 LCLN,US,Lincoln International Inc. Class A Common Stock,NYSE,stock
@@ -1755,7 +1751,6 @@ NWAX,US,New America Acquisition I Corp. Class A Common Stock,NYSE,stock
 NWG,US,NatWest Group plc American Depositary Shares (each representing two (2) Ordinary Shares),NYSE,stock
 NWN,US,Northwest Natural Holding Company Common Stock,NYSE,stock
 NX,US,Quanex Building Products Corporation Common Stock,NYSE,stock
-NXDR,US,Nextdoor Holdings Inc. Class A Common Stock,NYSE,stock
 NXDT,US,NexPoint Diversified Real Estate Trust Common Stock,NYSE,stock
 NXDT^A,US,NexPoint Diversified Real Estate Trust 5.50% Series A Cumulative Preferred Shares ($25.00 liquidation preference per share),NYSE,stock
 NXE,US,Nexgen Energy Ltd. Common Shares,NYSE,stock
@@ -1946,7 +1941,6 @@ PRH,US,Prudential Financial Inc. 5.950% Junior Subordinated Notes due 2062,NYSE,
 PRI,US,Primerica Inc. Common Stock,NYSE,stock
 PRIF^D,US,Priority Income Fund Inc. 7.00% Series D Term Preferred Stock due 2029,NYSE,stock
 PRIF^K,US,Priority Income Fund Inc. 7.000% Series K Cumulative Preferred Stock,NYSE,stock
-PRIF^L,US,Priority Income Fund Inc. 6.375% Series L Term Preferred Stock Due 2029,NYSE,stock
 PRIM,US,Primoris Services Corporation Common Stock,NYSE,stock
 PRKS,US,United Parks & Resorts Inc. Common Stock,NYSE,stock
 PRLB,US,Proto Labs Inc. Common stock,NYSE,stock
@@ -1973,7 +1967,6 @@ PSA^Q,US,Public Storage Depositary Shares Each Representing 1/1000 of a 3.950% C
 PSA^R,US,Public Storage Depositary Shares Each Representing 1/1000 of a 4.00% Cumulative Preferred Share of Bene cial Interest Series R,NYSE,stock
 PSA^S,US,Public Storage Depositary Shares Each Representing 1/1000 of a 4.100% Cumulative Preferred Share of Beneficial Interest Series S,NYSE,stock
 PSA^T,US,Public Storage 6.000% Cumulative Preferred Shares of beneficial interest Series T,NYSE,stock
-PSA^U,US,Public Storage 6.000% Cumulative Preferred Shares of Beneficial Interest Series U,NYSE,stock
 PSBD,US,Palmer Square Capital BDC Inc. Common Stock,NYSE,stock
 PSEC^A,US,Prospect Capital Corporation 5.35% Series A Fixed Rate Cumulative Perpetual Preferred Stock,NYSE,stock
 PSF,US,Cohen & Steers Select Preferred and Income Fund Inc. Common Stock,NYSE,stock
@@ -2004,6 +1997,7 @@ QXO^B,US,QXO Inc.  Depositary Shares each representing a 1/20th interest in a sh
 R,US,Ryder System Inc. Common Stock,NYSE,stock
 RA,US,Brookfield Real Assets Income Fund Inc. Common Stock,NYSE,stock
 RAC,US,Rithm Acquisition Corp. Class A Ordinary Shares,NYSE,stock
+RAC/WS,US,Rithm Acquisition Corp.,NYSE,stock
 RACE,US,Ferrari N.V. Common Shares,NYSE,stock
 RAL,US,Ralliant Corporation Common Stock,NYSE,stock
 RAMP,US,LiveRamp Holdings Inc. Common Stock,NYSE,stock
@@ -2267,7 +2261,6 @@ SRE,US,DBA Sempra Common Stock,NYSE,stock
 SREA,US,DBA Sempra 5.750% Junior Subordinated Notes due 2079,NYSE,stock
 SRFM,US,Surf Air Mobility Inc. Common Stock,NYSE,stock
 SRG,US,Seritage Growth Properties Class A Common Stock,NYSE,stock
-SRG^A,US,Seritage Growth Properties 7.00% Series A Cumulative Redeemable Preferred Shares of Beneficial Interest,NYSE,stock
 SRI,US,Stoneridge Inc. Common Stock,NYSE,stock
 SRJN,US,Spire Inc. 6.375% Junior Subordinated Notes due 2086,NYSE,stock
 SRL,US,Scully Royalty Ltd.,NYSE,stock
