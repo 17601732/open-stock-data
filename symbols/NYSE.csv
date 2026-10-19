@@ -35,7 +35,6 @@ ACR^C,US,ACRES Commercial Realty Corp. 8.625% Fixed-to-Floating Series C Cumulat
 ACR^D,US,ACRES Commercial Realty Corp. 7.875% Series D Cumulative Redeemable Preferred Stock,NYSE,stock
 ACRE,US,Ares Commercial Real Estate Corporation Common Stock,NYSE,stock
 ACV,US,Virtus Diversified Income & Convertible Fund Common Shares of Beneficial Interest,NYSE,stock
-ACVA,US,ACV Auctions Inc. Class A Common Stock,NYSE,stock
 AD,US,Array Digital Infrastructure Inc. Common Shares,NYSE,stock
 ADC,US,Agree Realty Corporation Common Stock,NYSE,stock
 ADC^A,US,Agree Realty Corporation Depositary Shares each representing 1/1000th of a 4.250% Series A Cumulative Redeemable Preferred Stock,NYSE,stock
@@ -145,7 +144,7 @@ AMRC,US,Ameresco Inc. Class A Common Stock,NYSE,stock
 AMRZ,US,Amrize Ltd Ordinary Shares,NYSE,stock
 AMT,US,American Tower Corporation (REIT) Common Stock,NYSE,stock
 AMTB,US,Amerant Bancorp Inc. Class A Common Stock,NYSE,stock
-AMTD,US,AMTD IDEA Group American Depositary Shares each representing six (6) Class A Ordinary Shares,NYSE,stock
+AMTD,US,AMTD IDEA Group American Depositary Shares each representing three hundred sixty (360) Class A Ordinary Shares,NYSE,stock
 AMTM,US,Amentum Holdings Inc. Common Stock,NYSE,stock
 AMWL,US,American Well Corporation Class A Common Stock,NYSE,stock
 AMX,US,America Movil S.A.B. de C.V. American Depositary Shares (each representing the right to receive twenty (20) Series B Shares,NYSE,stock
@@ -217,7 +216,6 @@ ATH^E,US,Athene Holding Ltd. Depositary Shares Each Representing a 1/1000th Inte
 ATHM,US,Autohome Inc. American Depositary Shares each representing four class A ordinary shares.,NYSE,stock
 ATHS,US,Athene Holding Ltd. 7.250% Fixed-Rate Reset Junior Subordinated Debentures due 2064,NYSE,stock
 ATI,US,ATI Inc. Common Stock,NYSE,stock
-ATKR,US,Atkore Inc. Common Stock,NYSE,stock
 ATMU,US,Atmus Filtration Technologies Inc. Common Stock,NYSE,stock
 ATO,US,Atmos Energy Corporation Common Stock,NYSE,stock
 ATR,US,AptarGroup Inc. Common Stock,NYSE,stock
@@ -1179,7 +1177,6 @@ HIW,US,Highwoods Properties Inc. Common Stock,NYSE,stock
 HIX,US,Western Asset High Income Fund II Inc. Common Stock,NYSE,stock
 HKD,US,AMTD Digital Inc. American Depositary Shares (every five of which represent two Class A Ordinary Shares),NYSE,stock
 HL,US,Hecla Mining Company Common Stock,NYSE,stock
-HL^B,US,Hecla Mining Company Preferred Stock,NYSE,stock
 HLF,US,Herbalife Ltd. Common Shares,NYSE,stock
 HLI,US,Houlihan Lokey Inc. Class A Common Stock,NYSE,stock
 HLIO,US,Helios Technologies Inc. Common Stock,NYSE,stock
@@ -2002,7 +1999,6 @@ QXO^B,US,QXO Inc.  Depositary Shares each representing a 1/20th interest in a sh
 R,US,Ryder System Inc. Common Stock,NYSE,stock
 RA,US,Brookfield Real Assets Income Fund Inc. Common Stock,NYSE,stock
 RAC,US,Rithm Acquisition Corp. Class A Ordinary Shares,NYSE,stock
-RAC/WS,US,Rithm Acquisition Corp.,NYSE,stock
 RACE,US,Ferrari N.V. Common Shares,NYSE,stock
 RAL,US,Ralliant Corporation Common Stock,NYSE,stock
 RAMP,US,LiveRamp Holdings Inc. Common Stock,NYSE,stock
@@ -2243,6 +2239,7 @@ SOUL,US,Soulpower Acquisition Corporation Class A Ordinary Shares,NYSE,stock
 SPB,US,Spectrum Brands Holdings Inc. Common Stock,NYSE,stock
 SPCE,US,Virgin Galactic Holdings Inc. Common Stock,NYSE,stock
 SPE,US,Special Opportunities Fund Inc Common Stock,NYSE,stock
+SPE^C,US,Special Opportunities Fund Inc. 2.75% Convertible Preferred Stock Series C,NYSE,stock
 SPG,US,Simon Property Group Inc. Common Stock,NYSE,stock
 SPG^J,US,Simon Property Group Inc. Simon Property Group 8 3/8% Series J Cumulative Redeemable Preferred Stock,NYSE,stock
 SPGI,US,S&P Global Inc. Common Stock,NYSE,stock
