@@ -9,7 +9,6 @@
 000011,SZ,深物业A,SZSE,stock
 000012,SZ,南玻Ａ,SZSE,stock
 000014,SZ,沙河股份,SZSE,stock
-000016,SZ,*ST康佳A,SZSE,stock
 000017,SZ,深中华A,SZSE,stock
 000019,SZ,深粮控股,SZSE,stock
 000020,SZ,深华发Ａ,SZSE,stock
@@ -1212,7 +1211,7 @@
 002728,SZ,特一药业,SZSE,stock
 002729,SZ,好利科技,SZSE,stock
 002730,SZ,电光科技,SZSE,stock
-002731,SZ,*ST萃华,SZSE,stock
+002731,SZ,萃华退,SZSE,stock
 002732,SZ,燕塘乳业,SZSE,stock
 002733,SZ,雄韬股份,SZSE,stock
 002734,SZ,利民股份,SZSE,stock
@@ -2904,5 +2903,5 @@
 301707,SZ,展芯股份,SZSE,stock
 301716,SZ,鸿富诚,SZSE,stock
 301717,SZ,超纯应材,SZSE,stock
-301718,SZ,N通则康威,SZSE,stock
+301718,SZ,C通则康威,SZSE,stock
 302132,SZ,中航成飞,SZSE,stock

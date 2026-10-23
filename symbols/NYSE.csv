@@ -498,7 +498,6 @@ CCZ,US,Comcast Holdings ZONES,NYSE,stock
 CDE,US,Coeur Mining Inc. Common Stock,NYSE,stock
 CDLR,US,Cadeler A/S American Depositary Share (each representing four (4) Ordinary Shares),NYSE,stock
 CDP,US,COPT Defense Properties Common Shares of Beneficial Interest,NYSE,stock
-CDR^B,US,Cedar Realty Trust Inc. 7.25% Series B Cumulative Redeemable Preferred Stock,NYSE,stock
 CDR^C,US,Cedar Realty Trust Inc. 6.50% Series C Cumulative Redeemable Preferred Stock,NYSE,stock
 CDRE,US,Cadre Holdings Inc. Common Stock,NYSE,stock
 CE,US,Celanese Corporation Common Stock,NYSE,stock
@@ -804,6 +803,7 @@ EEA,US,The European Equity Fund Inc. Common Stock,NYSE,stock
 EFC,US,Ellington Financial Inc. Common Stock,NYSE,stock
 EFC^B,US,Ellington Financial Inc. 6.250% Series B Fixed-Rate Reset Cumulative Redeemable Preferred Stock,NYSE,stock
 EFC^C,US,Ellington Financial Inc. 8.625% Series C Fixed-Rate Reset Cumulative Redeemable Preferred Stock,NYSE,stock
+EFC^D,US,Ellington Financial Inc. 7.00% Series D Cumulative Perpetual Redeemable Preferred Stock,NYSE,stock
 EFOR,US,Everforth Inc. Common Stock,NYSE,stock
 EFR,US,Eaton Vance Senior Floating-Rate Fund Common Shares of Beneficial Interest,NYSE,stock
 EFT,US,Eaton Vance Floating Rate Income Trust Common Shares of Beneficial Interest,NYSE,stock
@@ -1065,8 +1065,8 @@ GIL,US,Gildan Activewear Inc. Class A Sub. Vot. Common Stock,NYSE,stock
 GIS,US,General Mills Inc. Common Stock,NYSE,stock
 GJH,US,Synthetic Fixed-Income Securities Inc 6.375% (STRATS) Cl A-1,NYSE,stock
 GJO,US,Synthetic Fixed-Income Securities Inc. on behalf of STRATS(SM) Trust for Wal-Mart Stores Inc. Securities Series 2004-5,NYSE,stock
-GJR,US,Synthetic Fixed-Income Securities Inc. STRATS Trust for Procter&Gamble Securities Series 2006-1,NYSE,stock
 GJS,US,Goldman Sachs Group Securities STRATS Trust for Goldman Sachs Group Securities Series 2006-2,NYSE,stock
+GJT,US,Synthetic Fixed-Income Securities Inc. Floating Rate Structured Repackaged Asset-Backed Trust Securities Certificates Series 2006-3,NYSE,stock
 GKOS,US,Glaukos Corporation Common Stock,NYSE,stock
 GL,US,Globe Life Inc. Common Stock,NYSE,stock
 GL^D,US,Globe Life Inc. 4.25% Junior Subordinated Debentures due 2061,NYSE,stock
@@ -1312,7 +1312,7 @@ JHI,US,John Hancock Investors Trust Common Stock,NYSE,stock
 JHS,US,John Hancock Income Securities Trust Common Stock,NYSE,stock
 JHX,US,James Hardie Industries plc. Ordinary Shares,NYSE,stock
 JILL,US,J. Jill Inc. Common Stock,NYSE,stock
-JKS,US,JinkoSolar Holding Company Limited American Depositary Shares (each representing 4 Common Shares),NYSE,stock
+JKS,US,Jinko Holdings Limited American Depositary Shares (each representing 4 Ordinary Shares),NYSE,stock
 JLL,US,Jones Lang LaSalle Incorporated Common Stock,NYSE,stock
 JLS,US,Nuveen Mortgage and Income Fund,NYSE,stock
 JMIA,US,Jumia Technologies AG American Depositary Shares each representing two Ordinary Shares,NYSE,stock
@@ -1425,6 +1425,7 @@ LEO,US,BNY Mellon Strategic Municipals Inc. Common Stock,NYSE,stock
 LEU,US,Centrus Energy Corp. Class A Common Stock,NYSE,stock
 LEVI,US,Levi Strauss & Co Class A Common Stock,NYSE,stock
 LFT,US,Lument Finance Trust Inc. Common Stock,NYSE,stock
+LFT^A,US,Lument Finance Trust Inc. 7.875% Series A Cumulative Redeemable Preferred Stock,NYSE,stock
 LGI,US,Lazard Global Total Return and Income Fund Common Stock,NYSE,stock
 LH,US,Labcorp Holdings Inc. Common Stock,NYSE,stock
 LHX,US,L3Harris Technologies Inc. Common Stock,NYSE,stock
@@ -1453,7 +1454,7 @@ LSPD,US,Lightspeed Commerce Inc. Subordinate Voting Shares,NYSE,stock
 LTC,US,LTC Properties Inc. Common Stock,NYSE,stock
 LTH,US,Life Time Group Holdings Inc. Common Stock,NYSE,stock
 LTM,US,LATAM Airlines Group S.A. American Depositary Shares (each representing two thousand (2000) shares of Common Stock),NYSE,stock
-LU,US,Lufax Holding Ltd American Depositary Shares each representing two (2) Ordinary Shares,NYSE,stock
+LU,US,Lufax Holding Ltd American Depositary Shares (each representing twenty (20) Ordinary Shares),NYSE,stock
 LUCK,US,Lucky Strike Entertainment Corporation Class A Common Stock,NYSE,stock
 LUV,US,Southwest Airlines Company Common Stock,NYSE,stock
 LUXE,US,LuxExperience B.V. American Depositary Shares each representing one Ordinary Share,NYSE,stock
@@ -1864,7 +1865,6 @@ PEB^H,US,Pebblebrook Hotel Trust 5.700% Series H Cumulative Redeemable Preferred
 PEG,US,Public Service Enterprise Group Incorporated Common Stock,NYSE,stock
 PEN,US,Penumbra Inc. Common Stock,NYSE,stock
 PEO,US,Adams Natural Resources Fund Inc. Common Stock,NYSE,stock
-PERF,US,Perfect Corp. Class A Ordinary Share,NYSE,stock
 PEW,US,GrabAGun Digital Holdings Inc. Common Stock,NYSE,stock
 PFD,US,Flaherty & Crumrine Preferred and Income Fund Incorporated,NYSE,stock
 PFE,US,Pfizer Inc. Common Stock,NYSE,stock
@@ -1984,6 +1984,7 @@ PVH,US,PVH Corp. Common Stock,NYSE,stock
 PVL,US,Permianville Royalty Trust Units of Beneficial Interest,NYSE,stock
 PWR,US,Quanta Services Inc. Common Stock,NYSE,stock
 PXED,US,Phoenix Education Partners Inc. Common Stock,NYSE,stock
+PYT,US,PPlus Tr GSC-2 Tr Ctf Fltg Rate,NYSE,stock
 Q,US,Qnity Electronics Inc. Common Stock,NYSE,stock
 QGEN,US,Qiagen N.V. Common Shares,NYSE,stock
 QLEP,US,Quantum Leap Acquisition Corp Class A Ordinary Shares,NYSE,stock
