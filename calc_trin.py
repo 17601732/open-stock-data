@@ -1,40 +1,55 @@
 # ruff: noqa
-import akshare as ak
-import pandas as pd
-from datetime import datetime, timedelta
+import csv
+import json
+import urllib.request
+
 
 def main():
-    end_date = datetime.now().strftime('%Y%m%d')
-    start_date = (datetime.now() - timedelta(days=180)).strftime('%Y%m%d')
-    
-    try:
-        # 获取上证指数历史数据
-        df_sh = ak.stock_zh_index_daily_em(symbol="sh000001")
-        # 获取深证成指历史数据
-        df_sz = ak.stock_zh_index_daily_em(symbol="sz399001")
-        
-        # 合并数据并筛选近半年
-        df = pd.concat([df_sh, df_sz])
-        df['date'] = pd.to_datetime(df['date'])
-        df = df[df['date'] >= pd.to_datetime(start_date)]
-        
-        # 计算涨跌和成交额
-        df['change'] = df['close'] - df['open']
-        df['amount'] = df['amount']
-        
-        # 按日期分组计算每日的近似 TRIN
-        result = df.groupby('date').apply(lambda x: (len(x[x['change'] > 0]) / len(x[x['change'] < 0])) / (x[x['change'] > 0]['amount'].sum() / x[x['change'] < 0]['amount'].sum()) if len(x[x['change'] < 0]) > 0 else 1.0).reset_index()
-        result.columns = ['date', 'trin_raw']
-        
-        # 计算 21 天平滑
-        result['trin_smooth_21'] = result['trin_raw'].rolling(window=21, min_periods=1).mean()
-        
-        result.to_csv("trin_result.csv", index=False)
-        print("数据生成成功")
-        print(result.tail())
-        
-    except Exception as e:
-        print(f"发生错误: {e}")
+    # 获取上证指数最近 180 个交易日的真实行情
+    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000001,day,,,180,qfq"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    response = urllib.request.urlopen(req)
+    data = json.loads(response.read().decode("utf-8"))
+
+    klines = data["data"]["sh000001"]["day"]
+    results = []
+
+    # 采用滚动 21 天的量价关系计算 TRIN
+    for i in range(len(klines)):
+        window = klines[max(0, i - 20) : i + 1]
+        up_days = 0
+        down_days = 0
+        up_vol = 0.0
+        down_vol = 0.0
+
+        for w in window:
+            open_price = float(w[1])
+            close_price = float(w[2])
+            volume = float(w[5])
+
+            if close_price > open_price:
+                up_days += 1
+                up_vol += volume
+            elif close_price < open_price:
+                down_days += 1
+                down_vol += volume
+
+        # 计算 TRIN
+        if down_days > 0 and down_vol > 0:
+            trin = (up_days / down_days) / (up_vol / down_vol)
+        else:
+            trin = 1.0
+
+        results.append([klines[i][0], round(trin, 4)])
+
+    # 保存为 CSV
+    with open("trin_result.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "trin_smooth_21d"])
+        for row in results:
+            writer.writerow(row)
+    print("Success!")
+
 
 if __name__ == "__main__":
     main()
