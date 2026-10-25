@@ -1,35 +1,23 @@
 name: Calculate TRIN Data
 
 on:
-  workflow_dispatch: # 允许你手动点击运行
+  workflow_dispatch: 
   schedule:
-    - cron: '0 10 * * 1-5' # 每周一至周五 UTC 10:00 (北京时间 18:00) 自动运行
+    - cron: '0 10 * * 1-5'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 安装 Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: 安装 uv
-        uses: astral-sh/setup-uv@v3
-
-      - name: 安装项目依赖
-        run: uv sync
-
-      - name: 回填最近半年数据
-        run: uv run python -m scripts.backfill --market cn --start-year 2026 --end-year 2026 --local-only
-
-      - name: 运行 TRIN 计算脚本
-        run: uv run python calc_trin.py
-
-      - name: 上传计算结果 (Artifact)
+      - name: Install dependencies
+        run: pip install pandas requests
+      - name: Run TRIN script
+        run: python calc_trin.py
+      - name: Upload Result
         uses: actions/upload-artifact@v4
         with:
           name: trin-result-csv
