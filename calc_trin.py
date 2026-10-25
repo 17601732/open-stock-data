@@ -34,11 +34,11 @@ def main():
                 down_days += 1
                 down_vol += volume
 
-        # 计算 TRIN
-        if down_days > 0 and down_vol > 0:
-            trin = (up_days / down_days) / (up_vol / down_vol)
-        else:
+        # 核心修复：只要有任何一项为 0，直接返回 1.0，防止报错
+        if down_days == 0 or down_vol == 0.0 or up_vol == 0.0:
             trin = 1.0
+        else:
+            trin = (up_days / down_days) / (up_vol / down_vol)
 
         results.append([klines[i][0], round(trin, 4)])
 
