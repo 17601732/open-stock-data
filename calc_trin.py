@@ -1,65 +1,85 @@
 # ruff: noqa
-import akshare as ak
-import pandas as pd
-import concurrent.futures
-from datetime import datetime, timedelta
+import csv
+import json
+import urllib.request
+from datetime import datetime
 
-def fetch_stock_data(code):
-    try:
-        # 抓取单只股票近 120 个交易日的日线
-        df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date="20260601", end_date="20261025", adjust="")
-        if df.empty:
-            return None
-        df = df[['日期', '涨跌幅', '成交额']]
-        return df
-    except:
-        return None
+
+def fetch_sina_data(symbol):
+    url = f"https://quotes.sina.cn/cn/api/jsonp_v2.php/var%20_=/CN_MarketDataService.getKLineData?symbol={symbol}&scale=240&ma=no&datalen=180"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    response = urllib.request.urlopen(req)
+    text = response.read().decode("utf-8")
+    # 新浪返回的是 jsonp 格式，需要截取 JSON 部分
+    start_idx = text.find("(")
+    end_idx = text.rfind(")")
+    json_str = text[start_idx + 1 : end_idx]
+    return json.loads(json_str)
+
 
 def main():
-    print("1. 获取全市场股票列表...")
-    spot_df = ak.stock_zh_a_spot_em()
-    # 按成交额降序排列，取前 1000 只最活跃的股票（覆盖 80% 以上成交量，完美代表市场）
-    spot_df = spot_df.sort_values(by='成交额', ascending=False)
-    codes = spot_df['代码'].head(1000).tolist()
-
-    print("2. 并发下载近半年历史数据 (预计耗时 1 分钟)...")
-    all_data = []
+    print("Fetching historical data from Sina Finance...")
     
-    # 开启 10 个线程并发下载
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        results = executor.map(fetch_stock_data, codes)
-        for res in results:
-            if res is not None:
-                all_data.append(res)
-    
-    if not all_data:
-        print("下载失败，未获取到数据")
+    try:
+        # 获取上证指数和深证成指近 180 天数据
+        sh_data = fetch_sina_data("sh000001")
+        sz_data = fetch_sina_data("sz399001")
+    except Exception as e:
+        print(f"Fetch failed: {e}")
         return
-        
-    print("3. 合并数据并计算真实 TRIN...")
-    df_all = pd.concat(all_data, ignore_index=True)
-    df_all['日期'] = pd.to_datetime(df_all['日期'])
-    
-    def calc_daily_trin(group):
-        up = group[group['涨跌幅'] > 0]
-        down = group[group['涨跌幅'] < 0]
-        
-        if len(down) == 0 or down['成交额'].sum() == 0 or up['成交额'].sum() == 0:
-            return 1.0
-            
-        # 真实全市场 TRIN 公式
-        trin = (len(up) / len(down)) / (up['成交额'].sum() / down['成交额'].sum())
-        return trin
 
-    result = df_all.groupby('日期').apply(calc_daily_trin).reset_index()
-    result.columns = ['date', 'trin_raw']
+    # 按日期合并数据
+    daily_stats = {}
     
+    for item in sh_data + sz_data:
+        date = item["day"]
+        open_p = float(item["open"])
+        close_p = float(item["close"])
+        vol = float(item["volume"])
+        
+        if date not in daily_stats:
+            daily_stats[date] = {"up_count": 0, "down_count": 0, "up_vol": 0.0, "down_vol": 0.0}
+            
+        if close_p > open_p:
+            daily_stats[date]["up_count"] += 1
+            daily_stats[date]["up_vol"] += vol
+        elif close_p < open_p:
+            daily_stats[date]["down_count"] += 1
+            daily_stats[date]["down_vol"] += vol
+        else:
+            daily_stats[date]["up_count"] += 1
+            daily_stats[date]["up_vol"] += vol / 2
+            daily_stats[date]["down_count"] += 1
+            daily_stats[date]["down_vol"] += vol / 2
+
+    dates = sorted(daily_stats.keys())
+    results = []
+    
+    # 计算每日原始 TRIN
+    for d in dates:
+        s = daily_stats[d]
+        if s["down_count"] > 0 and s["down_vol"] > 0 and s["up_vol"] > 0:
+            trin = (s["up_count"] / s["down_count"]) / (s["up_vol"] / s["down_vol"])
+        else:
+            trin = 1.0
+        results.append([d, trin])
+
     # 计算 21 天平滑
-    result['trin_smooth_21'] = result['trin_raw'].rolling(window=21, min_periods=1).mean()
-    
-    result.to_csv("trin_result.csv", index=False)
-    print("Success! 已生成 trin_result.csv")
-    print(result.tail(10))
+    smooth_results = []
+    for i in range(len(results)):
+        window = results[max(0, i - 20) : i + 1]
+        avg_trin = sum(r[1] for r in window) / len(window)
+        smooth_results.append([results[i][0], round(results[i][1], 4), round(avg_trin, 4)])
+
+    # 保存
+    with open("trin_result.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "trin_raw", "trin_smooth_21"])
+        for row in smooth_results:
+            writer.writerow(row)
+            
+    print("Success! Check trin_result.csv")
+
 
 if __name__ == "__main__":
     main()
