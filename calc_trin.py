@@ -1,6 +1,6 @@
-import urllib.request
-import json
 import csv
+import json
+import urllib.request
 from datetime import datetime
 
 
