@@ -13,8 +13,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          
+      - name: Install dependencies
+        run: pip install pandas pyarrow
+        
       - name: Run TRIN script
         run: python calc_trin.py
+        
       - name: Upload Result
         uses: actions/upload-artifact@v4
         with:
