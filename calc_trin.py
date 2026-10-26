@@ -1,76 +1,63 @@
 # ruff: noqa
-import ast
-import csv
-import time
 import urllib.request
+import pandas as pd
 from datetime import datetime
 
-
 def main():
-    up_count = 0
-    down_count = 0
-    up_amount = 0.0
-    down_amount = 0.0
-
-    print("Fetching today's market data from Sina...")
+    print("1. 开始下载全市场底层数据库 (约 10-20MB)...")
+    # 直接获取原项目每天更新的全市场个股历史数据
+    url = "https://github.com/irachex/open-stock-data/releases/latest/download/cn_bars.parquet"
     
-    # 遍历全市场 A 股 (新浪接口每页 100 条)
-    for page in range(1, 60):
-        url = f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page={page}&num=100&sort=symbol&asc=1&node=hs_a&_s_r_a=page"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        urllib.request.urlretrieve(url, "cn_bars.parquet")
+        print("下载成功！正在读取数据...")
+    except Exception as e:
+        print(f"下载失败，请检查网络: {e}")
+        return
+
+    # 读取 Parquet 文件
+    df = pd.read_parquet("cn_bars.parquet")
+    
+    # 统一日期格式，并截取最近 6 个月的数据
+    df['date'] = pd.to_datetime(df['date'])
+    # 动态计算半年前的日期
+    start_date = pd.Timestamp.now() - pd.Timedelta(days=180)
+    df = df[df['date'] >= start_date]
+    
+    print(f"2. 数据加载完毕，共 {len(df)} 条个股日线记录。开始计算 TRIN...")
+    
+    # 计算单日全市场 TRIN
+    def calc_daily_trin(group):
+        # 判定涨跌：如果你有 pct_chg 字段可用 pct_chg > 0，否则用 close > open
+        if 'pct_chg' in group.columns:
+            up = group[group['pct_chg'] > 0]
+            down = group[group['pct_chg'] < 0]
+        else:
+            up = group[group['close'] > group['open']]
+            down = group[group['close'] < group['open']]
         
-        try:
-            res = urllib.request.urlopen(req).read().decode("gbk")
-            if not res or res == "null":
-                break
+        # 防除零保护
+        if len(down) == 0 or down['amount'].sum() == 0 or up['amount'].sum() == 0:
+            return 1.0
             
-            data = ast.literal_eval(res)
-            if not data:
-                break
-                
-            for item in data:
-                try:
-                    pct = float(item["changepercent"])
-                    amt = float(item["amount"])
-                    
-                    if pct > 0:
-                        up_count += 1
-                        up_amount += amt
-                    elif pct < 0:
-                        down_count += 1
-                        down_amount += amt
-                except:
-                    continue
-        except Exception as e:
-            print(f"Error on page {page}: {e}")
-            break
-            
-        time.sleep(0.1) # 微小延迟防封
+        # 真实全市场 TRIN 公式 (使用成交额 amount 计算，更贴近现代市场)
+        trin = (len(up) / len(down)) / (up['amount'].sum() / down['amount'].sum())
+        return trin
 
-    if down_count > 0 and down_amount > 0 and up_amount > 0:
-        trin = (up_count / down_count) / (up_amount / down_amount)
-    else:
-        trin = 0.0
-
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    # 按天分组并应用公式
+    result = df.groupby('date').apply(calc_daily_trin).reset_index()
+    result.columns = ['date', 'trin_raw']
     
-    print(f"Up Count: {up_count}, Down Count: {down_count}")
-    print(f"Up Amount: {up_amount/1e8:.2f} 亿, Down Amount: {down_amount/1e8:.2f} 亿")
-    print(f"TRIN: {trin:.4f}")
-
-    # 将所有的中间变量全部写入 CSV
-    with open("trin_result.csv", "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["date", "up_count", "down_count", "up_amount_yi", "down_amount_yi", "trin_raw"])
-        writer.writerow([
-            date_str, 
-            up_count, 
-            down_count, 
-            round(up_amount / 1e8, 2), 
-            round(down_amount / 1e8, 2), 
-            round(trin, 4)
-        ])
-
+    # 计算 21 天平滑均线
+    result['trin_smooth_21'] = result['trin_raw'].rolling(window=21, min_periods=1).mean()
+    
+    # 格式化日期
+    result['date'] = result['date'].dt.strftime('%Y-%m-%d')
+    
+    # 保存结果
+    result.to_csv("trin_result.csv", index=False)
+    print("3. 计算完成！已保存至 trin_result.csv")
+    print(result.tail(10))
 
 if __name__ == "__main__":
     main()
