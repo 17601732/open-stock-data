@@ -1,84 +1,75 @@
 # ruff: noqa
+import ast
 import csv
-import json
+import time
 import urllib.request
 from datetime import datetime
 
 
-def fetch_sina_data(symbol):
-    url = f"https://quotes.sina.cn/cn/api/jsonp_v2.php/var%20_=/CN_MarketDataService.getKLineData?symbol={symbol}&scale=240&ma=no&datalen=180"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    response = urllib.request.urlopen(req)
-    text = response.read().decode("utf-8")
-    # 新浪返回的是 jsonp 格式，需要截取 JSON 部分
-    start_idx = text.find("(")
-    end_idx = text.rfind(")")
-    json_str = text[start_idx + 1 : end_idx]
-    return json.loads(json_str)
-
-
 def main():
-    print("Fetching historical data from Sina Finance...")
-    
-    try:
-        # 获取上证指数和深证成指近 180 天数据
-        sh_data = fetch_sina_data("sh000001")
-        sz_data = fetch_sina_data("sz399001")
-    except Exception as e:
-        print(f"Fetch failed: {e}")
-        return
+    up_count = 0
+    down_count = 0
+    up_amount = 0.0
+    down_amount = 0.0
 
-    # 按日期合并数据
-    daily_stats = {}
+    print("Fetching today's market data from Sina...")
     
-    for item in sh_data + sz_data:
-        date = item["day"]
-        open_p = float(item["open"])
-        close_p = float(item["close"])
-        vol = float(item["volume"])
+    # 遍历全市场 A 股 (新浪接口每页 100 条)
+    for page in range(1, 60):
+        url = f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page={page}&num=100&sort=symbol&asc=1&node=hs_a&_s_r_a=page"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         
-        if date not in daily_stats:
-            daily_stats[date] = {"up_count": 0, "down_count": 0, "up_vol": 0.0, "down_vol": 0.0}
+        try:
+            res = urllib.request.urlopen(req).read().decode("gbk")
+            if not res or res == "null":
+                break
             
-        if close_p > open_p:
-            daily_stats[date]["up_count"] += 1
-            daily_stats[date]["up_vol"] += vol
-        elif close_p < open_p:
-            daily_stats[date]["down_count"] += 1
-            daily_stats[date]["down_vol"] += vol
-        else:
-            daily_stats[date]["up_count"] += 1
-            daily_stats[date]["up_vol"] += vol / 2
-            daily_stats[date]["down_count"] += 1
-            daily_stats[date]["down_vol"] += vol / 2
+            data = ast.literal_eval(res)
+            if not data:
+                break
+                
+            for item in data:
+                try:
+                    pct = float(item["changepercent"])
+                    amt = float(item["amount"])
+                    
+                    if pct > 0:
+                        up_count += 1
+                        up_amount += amt
+                    elif pct < 0:
+                        down_count += 1
+                        down_amount += amt
+                except:
+                    continue
+        except Exception as e:
+            print(f"Error on page {page}: {e}")
+            break
+            
+        time.sleep(0.1) # 微小延迟防封
 
-    dates = sorted(daily_stats.keys())
-    results = []
+    if down_count > 0 and down_amount > 0 and up_amount > 0:
+        trin = (up_count / down_count) / (up_amount / down_amount)
+    else:
+        trin = 0.0
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
     
-    # 计算每日原始 TRIN
-    for d in dates:
-        s = daily_stats[d]
-        if s["down_count"] > 0 and s["down_vol"] > 0 and s["up_vol"] > 0:
-            trin = (s["up_count"] / s["down_count"]) / (s["up_vol"] / s["down_vol"])
-        else:
-            trin = 1.0
-        results.append([d, trin])
+    print(f"Up Count: {up_count}, Down Count: {down_count}")
+    print(f"Up Amount: {up_amount/1e8:.2f} 亿, Down Amount: {down_amount/1e8:.2f} 亿")
+    print(f"TRIN: {trin:.4f}")
 
-    # 计算 21 天平滑
-    smooth_results = []
-    for i in range(len(results)):
-        window = results[max(0, i - 20) : i + 1]
-        avg_trin = sum(r[1] for r in window) / len(window)
-        smooth_results.append([results[i][0], round(results[i][1], 4), round(avg_trin, 4)])
-
-    # 保存
+    # 将所有的中间变量全部写入 CSV
     with open("trin_result.csv", "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["date", "trin_raw", "trin_smooth_21"])
-        for row in smooth_results:
-            writer.writerow(row)
-            
-    print("Success! Check trin_result.csv")
+        writer.writerow(["date", "up_count", "down_count", "up_amount_yi", "down_amount_yi", "trin_raw"])
+        writer.writerow([
+            date_str, 
+            up_count, 
+            down_count, 
+            round(up_amount / 1e8, 2), 
+            round(down_amount / 1e8, 2), 
+            round(trin, 4)
+        ])
 
 
 if __name__ == "__main__":
