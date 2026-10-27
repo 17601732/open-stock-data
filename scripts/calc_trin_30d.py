@@ -1,97 +1,139 @@
 # ruff: noqa
 import csv
 import os
-import time
-import urllib.request
-import re
+import struct
+from collections import defaultdict
 from datetime import datetime
 
-def get_all_cn_codes():
-    print("正在获取全市场股票代码...")
-    url = "http://stock.gtimg.cn/data/index.php?appn=rank&t=rankash/chr&p=1&o=0&l=6000&v=list_data"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    res = urllib.request.urlopen(req).read().decode("gbk")
-    
-    match = re.search(r'"(.*?)"', res)
-    if not match:
-        return []
-    
-    all_codes = match.group(1).split(",")
-    # 剔除北交所 (bj) 和 沪深B股等特殊代码
-    valid_codes = [c for c in all_codes if c.startswith("sh") or c.startswith("sz")]
-    # 剔除科创板688等（如果你不需要的话，但通常全市场TRIN包含科创）
-    return valid_codes
+def parse_tdx_day(file_path):
+    """解析通达信单只股票的日线文件 (.day)"""
+    records = []
+    try:
+        with open(file_path, 'rb') as f:
+            content = f.read()
+            # 每天的数据占 32 个字节
+            for i in range(0, len(content), 32):
+                if i + 32 > len(content):
+                    break
+                # < 代表小端，I 代表无符号整数(4字节)，f 代表浮点数(4字节)
+                # 格式: 日期, 开盘, 最高, 最低, 收盘, 成交额, 成交量, 保留
+                row = struct.unpack('<IIIIIfII', content[i:i+32])
+                date_str = str(row[0])
+                # 如果日期不是 8 位数，说明数据异常或结束了
+                if len(date_str) != 8:
+                    continue
+                
+                # 通达信的价格是乘以 100 后的整数，需要除以 100 还原
+                close = row[4] / 100.0
+                # 成交量 (股)
+                volume = row[6]
+                
+                records.append({
+                    "date": date_str,
+                    "close": close,
+                    "volume": volume
+                })
+    except Exception as e:
+        print(f"读取文件 {file_path} 出错: {e}")
+    return records
 
 def main():
-    codes = get_all_cn_codes()
-    print(f"共获取到 {len(codes)} 只沪深股票代码。")
+    print("开始解析通达信本地数据...")
     
-    up_count, down_count = 0, 0
-    up_vol, down_vol = 0.0, 0.0
+    # 通达信解压后的路径通常长这样：vipdoc/sh/lday/*.day 和 vipdoc/sz/lday/*.day
+    # 请根据你 zip 解压后的实际目录结构调整，这里假设解压在 tdx_data 目录下
+    base_dir = "tdx_data"
+    folders = [
+        os.path.join(base_dir, "vipdoc", "sh", "lday"),
+        os.path.join(base_dir, "vipdoc", "sz", "lday")
+    ]
+    
+    # 用于按日期聚合: daily_data['20231026'] = {'up': 0, 'down': 0, 'up_vol': 0, 'down_vol': 0}
+    daily_data = defaultdict(lambda: {"up_count": 0, "down_count": 0, "up_vol": 0.0, "down_vol": 0.0})
+    
+    file_count = 0
+    for folder in folders:
+        if not os.path.exists(folder):
+            print(f"警告: 找不到目录 {folder}")
+            continue
+            
+        for filename in os.listdir(folder):
+            # 只要日线文件 .day
+            if not filename.endswith(".day"):
+                continue
+                
+            file_path = os.path.join(folder, filename)
+            # 解析出单只股票的所有历史数据
+            stock_data = parse_tdx_day(file_path)
+            
+            # 过滤北交所 (代码 8 开头或 4 开头，通达信通常不包含在 sh/sz 目录，但以防万一)
+            if filename.startswith(("sh8", "sz8", "sz4")):
+                continue
+                
+            # 过滤新股 (如果上市天数少于 30 天，说明是次新股/新股)
+            if len(stock_data) < 30:
+                continue
+                
+            # 遍历这只股票的每一天
+            for i in range(1, len(stock_data)):
+                today = stock_data[i]
+                yesterday = stock_data[i-1]
+                
+                date = today["date"]
+                close = today["close"]
+                prev_close = yesterday["close"]
+                volume = today["volume"]
+                
+                # 判断涨跌
+                if close > prev_close:
+                    daily_data[date]["up_count"] += 1
+                    daily_data[date]["up_vol"] += volume
+                elif close < prev_close:
+                    daily_data[date]["down_count"] += 1
+                    daily_data[date]["down_vol"] += volume
+                    
+            file_count += 1
+            if file_count % 500 == 0:
+                print(f"已解析 {file_count} 只股票...")
 
-    # 每次请求 80 只
-    batch_size = 80
-    for i in range(0, len(codes), batch_size):
-        batch = codes[i:i+batch_size]
-        query = ",".join(batch)
-        url = f"https://qt.gtimg.cn/q={query}"
+    print(f"解析完成！共处理 {file_count} 只股票。")
+
+    # 接下来计算 TRIN 并写入 CSV
+    # 我们只取最近 60 个交易日的数据（足够算 30 日均值了）
+    sorted_dates = sorted(list(daily_data.keys()))[-60:]
+    
+    results = []
+    for date in sorted_dates:
+        d = daily_data[date]
+        up_c = d["up_count"]
+        down_c = d["down_count"]
+        up_v = d["up_vol"]
+        down_v = d["down_vol"]
         
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            res = urllib.request.urlopen(req).read().decode("gbk")
+        if down_c > 0 and down_v > 0 and up_v > 0:
+            trin = (up_c / down_c) / (up_v / down_v)
+        else:
+            trin = 0.0
             
-            # 腾讯返回的每一行用 ; 隔开
-            for line in res.strip().split(";"):
-                if not line.strip(): continue
-                parts = line.split("~")
-                if len(parts) < 40: continue
-                
-                name = parts[1]
-                # 过滤 ST 股、退市股
-                if "ST" in name.upper() or "退" in name:
-                    continue
-                # 过滤 N (首日上市) 和 C (上市次日到第五日，不设涨跌幅)
-                if name.startswith(("N", "C", "U", "W")):
-                    continue
-                
-                pct = float(parts[32]) if parts[32] else 0.0
-                # 注意：腾讯接口的第 36 个字段是成交额(万)，这里为了精准，用成交量(手)
-                vol = float(parts[6]) if parts[6] else 0.0
-                
-                if pct > 0:
-                    up_count += 1
-                    up_vol += vol
-                elif pct < 0:
-                    down_count += 1
-                    down_vol += vol
-        except Exception as e:
-            print(f"批次 {i//batch_size + 1} 请求失败: {e}")
-            
-        # 休息 3 秒防封
-        time.sleep(3)
-        if (i // batch_size) % 10 == 0:
-            print(f"已处理 {i}/{len(codes)} 只股票...")
+        results.append({
+            "date": date,
+            "up_count": up_c,
+            "down_count": down_c,
+            "trin_raw": round(trin, 4)
+        })
 
-    if down_count > 0 and down_vol > 0:
-        trin = (up_count / down_count) / (up_vol / down_vol)
-    else:
-        trin = 0.0
-
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    
     # 写入 CSV
-    file_exists = os.path.isfile("trin_30d.csv")
-    with open("trin_30d.csv", "a", newline="") as f:
+    out_file = "trin_30d.csv"
+    with open(out_file, "w", newline="") as f:
         writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["date", "up_count", "down_count", "up_vol", "down_vol", "trin_raw"])
-        writer.writerow([
-            date_str, up_count, down_count, 
-            int(up_vol), int(down_vol), round(trin, 4)
-        ])
-    
-    print(f"完成！上涨家数: {up_count}, 下跌家数: {down_count}")
-    print(f"TRIN: {trin:.4f}")
+        writer.writerow(["date", "up_count", "down_count", "trin_raw"])
+        for row in results:
+            writer.writerow([row["date"], row["up_count"], row["down_count"], row["trin_raw"]])
+            
+    print(f"成功生成 {out_file}，包含近 {len(results)} 个交易日的数据。")
+    # 打印最后 5 天看看效果
+    for r in results[-5:]:
+        print(r)
 
 if __name__ == "__main__":
     main()
