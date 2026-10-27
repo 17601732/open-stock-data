@@ -1,0 +1,40 @@
+name: 计算30日TRIN（基于cn_bars）
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 16 * * 1-5"  # 北京时间 00:00（UTC 16:00），工作日
+
+jobs:
+  trin:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载原仓库 cn_bars.parquet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p data
+          gh release download data-cn-bars -p "cn_bars.parquet" -D data
+          ls -lh data
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install pandas numpy pyarrow
+
+      - name: 计算 TRIN
+        run: python scripts/calc_trin_30d.py
+
+      - name: 上传结果到 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload trin-results trin_30d.csv --clobber || \
+          gh release create trin-results trin_30d.csv --title "TRIN 30日结果"
