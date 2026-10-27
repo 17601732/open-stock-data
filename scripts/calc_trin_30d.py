@@ -1,5 +1,5 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
 from pathlib import Path
 
 # 读取原仓库 cn_bars (未复权, TRIN无需复权)
@@ -9,8 +9,8 @@ if not p.exists():
 
 df = pd.read_parquet(p)
 
-# 排除北交所 (8开头) 仅留沪深A股
-df = df[df["code"].astype(str).str.startswith("8") == False]
+# 排除北交所 (8开头) 仅留沪深A股 (修复 E712: 使用 not 替代 == False)
+df = df[~df["code"].astype(str).str.startswith("8")]
 
 df["date"] = pd.to_datetime(df["date"])
 
