@@ -22,12 +22,15 @@ jobs:
 
       - name: 下载并解压通达信数据
         run: |
-          # 从你的 Releases 下载 hsjday.1.zip
+          # 安装 7z 解压工具
+          sudo apt-get update && sudo apt-get install -y p7zip-full
+          # 下载你 Release 里的文件
           curl -L -o hsjday.1.zip https://github.com/17601732/open-stock-data/releases/download/tdx-data/hsjday.1.zip
-          # 解压到 tdx_data 目录下
+          # 创建目标文件夹
           mkdir -p tdx_data
-          unzip -q hsjday.1.zip -d tdx_data/
-          # 看看解压出了什么结构，方便排查
+          # 使用 7z 解压
+          7z x hsjday.1.zip -otdx_data/ -y
+          # 打印解压后的目录，方便你检查是否解压成功
           ls -l tdx_data/
 
       - name: 运行解析与计算脚本
@@ -38,4 +41,4 @@ jobs:
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
           git add trin_30d.csv
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update TRIN from TDX data" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update TRIN data from TDX" && git push)
