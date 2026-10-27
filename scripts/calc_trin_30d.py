@@ -3,7 +3,6 @@ import csv
 import os
 import struct
 from collections import defaultdict
-from datetime import datetime
 
 def parse_tdx_day(file_path):
     """解析通达信单只股票的日线文件 (.day)"""
@@ -15,18 +14,15 @@ def parse_tdx_day(file_path):
             for i in range(0, len(content), 32):
                 if i + 32 > len(content):
                     break
-                # < 代表小端，I 代表无符号整数(4字节)，f 代表浮点数(4字节)
-                # 格式: 日期, 开盘, 最高, 最低, 收盘, 成交额, 成交量, 保留
+                # 解析 32 字节：日期, 开盘, 最高, 最低, 收盘, 成交额, 成交量, 保留
                 row = struct.unpack('<IIIIIfII', content[i:i+32])
                 date_str = str(row[0])
-                # 如果日期不是 8 位数，说明数据异常或结束了
                 if len(date_str) != 8:
                     continue
                 
-                # 通达信的价格是乘以 100 后的整数，需要除以 100 还原
+                # 通达信价格是乘以 100 后存储的整数
                 close = row[4] / 100.0
-                # 成交量 (股)
-                volume = row[6]
+                volume = row[6] # 成交量（股）
                 
                 records.append({
                     "date": date_str,
@@ -34,21 +30,20 @@ def parse_tdx_day(file_path):
                     "volume": volume
                 })
     except Exception as e:
-        print(f"读取文件 {file_path} 出错: {e}")
+        pass
     return records
 
 def main():
     print("开始解析通达信本地数据...")
     
-    # 通达信解压后的路径通常长这样：vipdoc/sh/lday/*.day 和 vipdoc/sz/lday/*.day
-    # 请根据你 zip 解压后的实际目录结构调整，这里假设解压在 tdx_data 目录下
+    # 通达信解压后的路径
     base_dir = "tdx_data"
     folders = [
         os.path.join(base_dir, "vipdoc", "sh", "lday"),
         os.path.join(base_dir, "vipdoc", "sz", "lday")
     ]
     
-    # 用于按日期聚合: daily_data['20231026'] = {'up': 0, 'down': 0, 'up_vol': 0, 'down_vol': 0}
+    # 按日期聚合
     daily_data = defaultdict(lambda: {"up_count": 0, "down_count": 0, "up_vol": 0.0, "down_vol": 0.0})
     
     file_count = 0
@@ -58,23 +53,21 @@ def main():
             continue
             
         for filename in os.listdir(folder):
-            # 只要日线文件 .day
             if not filename.endswith(".day"):
                 continue
                 
             file_path = os.path.join(folder, filename)
-            # 解析出单只股票的所有历史数据
             stock_data = parse_tdx_day(file_path)
             
-            # 过滤北交所 (代码 8 开头或 4 开头，通达信通常不包含在 sh/sz 目录，但以防万一)
-            if filename.startswith(("sh8", "sz8", "sz4")):
+            # 过滤北交所 (通常代码前缀为 bj 或 8/4 开头，此处仅为防万一)
+            if filename.startswith(("bj", "sh8", "sz8", "sz4")):
                 continue
                 
-            # 过滤新股 (如果上市天数少于 30 天，说明是次新股/新股)
-            if len(stock_data) < 30:
+            # 过滤新股/次新股 (如果历史数据少于 60 天，直接忽略)
+            if len(stock_data) < 60:
                 continue
                 
-            # 遍历这只股票的每一天
+            # 遍历这只股票的每天数据
             for i in range(1, len(stock_data)):
                 today = stock_data[i]
                 yesterday = stock_data[i-1]
@@ -93,13 +86,12 @@ def main():
                     daily_data[date]["down_vol"] += volume
                     
             file_count += 1
-            if file_count % 500 == 0:
+            if file_count % 1000 == 0:
                 print(f"已解析 {file_count} 只股票...")
 
     print(f"解析完成！共处理 {file_count} 只股票。")
 
-    # 接下来计算 TRIN 并写入 CSV
-    # 我们只取最近 60 个交易日的数据（足够算 30 日均值了）
+    # 取最近 60 个交易日
     sorted_dates = sorted(list(daily_data.keys()))[-60:]
     
     results = []
@@ -119,6 +111,8 @@ def main():
             "date": date,
             "up_count": up_c,
             "down_count": down_c,
+            "up_vol": up_v,
+            "down_vol": down_v,
             "trin_raw": round(trin, 4)
         })
 
@@ -126,9 +120,9 @@ def main():
     out_file = "trin_30d.csv"
     with open(out_file, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["date", "up_count", "down_count", "trin_raw"])
+        writer.writerow(["date", "up_count", "down_count", "up_vol", "down_vol", "trin_raw"])
         for row in results:
-            writer.writerow([row["date"], row["up_count"], row["down_count"], row["trin_raw"]])
+            writer.writerow([row["date"], row["up_count"], row["down_count"], row["up_vol"], row["down_vol"], row["trin_raw"]])
             
     print(f"成功生成 {out_file}，包含近 {len(results)} 个交易日的数据。")
     # 打印最后 5 天看看效果
