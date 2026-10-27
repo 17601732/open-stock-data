@@ -1,40 +1,25 @@
-name: 计算30日TRIN（适配原仓库cn_bars）
+name: 计算30日TRIN
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 16 * * 1-5"  # 工作日 UTC 16:00（北京 00:00）
+    - cron: '30 8 * * 1-5'
 
 jobs:
-  trin:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: 下载原仓库 cn_bars.parquet
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p data
-          gh release download data-cn-bars -p "cn_bars.parquet" -D data
-          ls -lh data
-
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: 安装依赖
-        run: pip install pandas numpy pyarrow
-
-      - name: 运行 TRIN 计算（含30日均值）
+          python-version: '3.12'
+      - name: 运行计算脚本
         run: python scripts/calc_trin_30d.py
-
-      - name: 上传结果到 Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: 提交并保存结果
         run: |
-          gh release upload trin-results trin_30d.csv --clobber || \
-          gh release create trin-results trin_30d.csv --title "TRIN 30日结果"
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add trin_30d.csv
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update TRIN data" && git push)
