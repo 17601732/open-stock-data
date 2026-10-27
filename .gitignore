@@ -6,6 +6,13 @@ __pycache__/
 dist/
 build/
 
+*.zip
+raw/
+tmp/
+tdx_cn_*.csv
+tdx_cn_*.parquet
+
+
 # Virtual environment
 .venv/
 
