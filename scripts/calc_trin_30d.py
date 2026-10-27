@@ -1,6 +1,7 @@
+from pathlib import Path
 import pandas as pd
 import numpy as np
-from pathlib import Path
+
 
 # 读取原仓库 cn_bars (未复权, TRIN无需复权)
 p = Path("data/cn_bars.parquet")
