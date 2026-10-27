@@ -1,9 +1,9 @@
-name: 计算30日TRIN（基于cn_bars）
+name: 计算30日TRIN（适配原仓库cn_bars）
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 16 * * 1-5"  # 北京时间 00:00（UTC 16:00），工作日
+    - cron: "0 16 * * 1-5"  # 工作日 UTC 16:00（北京 00:00）
 
 jobs:
   trin:
@@ -29,7 +29,7 @@ jobs:
       - name: 安装依赖
         run: pip install pandas numpy pyarrow
 
-      - name: 计算 TRIN
+      - name: 运行 TRIN 计算（含30日均值）
         run: python scripts/calc_trin_30d.py
 
       - name: 上传结果到 Release
