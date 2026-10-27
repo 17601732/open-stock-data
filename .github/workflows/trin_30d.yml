@@ -10,16 +10,32 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: 运行计算脚本
+
+      - name: 下载并解压通达信数据
+        run: |
+          # 从你的 Releases 下载 hsjday.1.zip
+          curl -L -o hsjday.1.zip https://github.com/17601732/open-stock-data/releases/download/tdx-data/hsjday.1.zip
+          # 解压到 tdx_data 目录下
+          mkdir -p tdx_data
+          unzip -q hsjday.1.zip -d tdx_data/
+          # 看看解压出了什么结构，方便排查
+          ls -l tdx_data/
+
+      - name: 运行解析与计算脚本
         run: python scripts/calc_trin_30d.py
+
       - name: 提交并保存结果
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
           git add trin_30d.csv
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update TRIN data" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update TRIN from TDX data" && git push)
