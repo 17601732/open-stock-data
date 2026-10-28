@@ -3,13 +3,46 @@ import csv
 import os
 import re
 import struct
+import zipfile
 from collections import defaultdict
 
-def parse_tdx_day(file_path):
-    records = []
-    try:
-        with open(file_path, 'rb') as f:
-            content = f.read()
+def main():
+    zip_path = "hsjday.1.zip"
+    if not os.path.exists(zip_path):
+        print(f"❌ 找不到压缩包 {zip_path}")
+        return
+
+    print("开始直读压缩包内的数据（无需解压）...")
+    
+    daily_data = defaultdict(lambda: {"up_count": 0, "down_count": 0, "up_vol": 0.0, "down_vol": 0.0})
+    valid_stock_count = 0
+    
+    # 直接打开 zip 文件
+    with zipfile.ZipFile(zip_path, 'r') as z:
+        # 遍历压缩包内的所有文件
+        for file_info in z.infolist():
+            filename = file_info.filename.lower()
+            
+            # 找 .day 文件
+            if not filename.endswith('.day'):
+                continue
+                
+            match = re.search(r'(\d{6})\.day$', filename)
+            if not match:
+                continue
+            code = match.group(1)
+            
+            # 白名单过滤
+            is_sh_a = code.startswith(("600", "601", "603", "605", "688"))
+            is_sz_a = code.startswith(("000", "001", "002", "003", "300", "301"))
+            if not (is_sh_a or is_sz_a):
+                continue
+                
+            # 直接读取文件内容到内存
+            content = z.read(file_info.filename)
+            
+            # 解析二进制数据
+            records = []
             for i in range(0, len(content), 32):
                 if i + 32 > len(content):
                     break
@@ -21,78 +54,42 @@ def parse_tdx_day(file_path):
                 formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
                 close = row[4] / 100.0
                 volume = row[6]
+                records.append({"date": formatted_date, "close": close, "volume": volume})
                 
-                records.append({
-                    "date": formatted_date,
-                    "close": close,
-                    "volume": volume
-                })
-    except Exception:
-        pass
-    return records
-
-def main():
-    print("开始解析A股历史数据...")
-    
-    base_dir = "tdx_data"
-    day_files = []
-    for root, dirs, files in os.walk(base_dir):
-        for file in files:
-            if file.lower().endswith('.day'):
-                day_files.append(os.path.join(root, file))
-
-    daily_data = defaultdict(lambda: {"up_count": 0, "down_count": 0, "up_vol": 0.0, "down_vol": 0.0})
-    valid_stock_count = 0
-    
-    for file_path in day_files:
-        filename = os.path.basename(file_path).lower()
-        match = re.search(r'(\d{6})\.day$', filename)
-        if not match:
-            continue
-        code = match.group(1)
-        
-        is_sh_a = code.startswith(("600", "601", "603", "605", "688"))
-        is_sz_a = code.startswith(("000", "001", "002", "003", "300", "301"))
-        if not (is_sh_a or is_sz_a):
-            continue
-            
-        stock_data = parse_tdx_day(file_path)
-        if len(stock_data) < 5: # 放宽次新股限制
-            continue
-            
-        for i in range(1, len(stock_data)):
-            today = stock_data[i]
-            yesterday = stock_data[i-1]
-            
-            date = today["date"]
-            close = today["close"]
-            prev_close = yesterday["close"]
-            volume = today["volume"]
-            
-            if close > prev_close:
-                daily_data[date]["up_count"] += 1
-                daily_data[date]["up_vol"] += volume
-            elif close < prev_close:
-                daily_data[date]["down_count"] += 1
-                daily_data[date]["down_vol"] += volume
+            if len(records) < 5:
+                continue
                 
-        valid_stock_count += 1
+            # 按日累加
+            for i in range(1, len(records)):
+                today = records[i]
+                yesterday = records[i-1]
+                
+                date = today["date"]
+                close = today["close"]
+                prev_close = yesterday["close"]
+                volume = today["volume"]
+                
+                if close > prev_close:
+                    daily_data[date]["up_count"] += 1
+                    daily_data[date]["up_vol"] += volume
+                elif close < prev_close:
+                    daily_data[date]["down_count"] += 1
+                    daily_data[date]["down_vol"] += volume
+                    
+            valid_stock_count += 1
 
     print(f"✅ 参与计算的A股数量：{valid_stock_count} 只。")
-
-    # 获取全部日期并排序
+    
+    # 检查历史天数
     all_sorted_dates = sorted(list(daily_data.keys()))
     print(f"📅 压缩包中包含的全部历史天数：{len(all_sorted_dates)} 天。")
     if len(all_sorted_dates) > 0:
         print(f"📅 历史最早日期：{all_sorted_dates[0]}，最新日期：{all_sorted_dates[-1]}")
 
-    # 核心：只取最后 180 天
-    target_dates = all_sorted_dates[-180:]
-    
     results = []
     trin_history = []
     
-    for date in target_dates:
+    for date in all_sorted_dates:
         d = daily_data[date]
         up_c = d["up_count"]
         down_c = d["down_count"]
@@ -106,7 +103,6 @@ def main():
             
         trin_history.append(trin)
         
-        # 计算 30 日平滑
         if len(trin_history) >= 30:
             ma30 = sum(trin_history[-30:]) / 30.0
         else:
@@ -122,15 +118,14 @@ def main():
             "trin_ma30": round(ma30, 4)
         })
 
-    # 保存为新的文件，防止和旧的混淆
-    out_file = "trin_180d.csv"
+    out_file = "trin_history.csv"
     with open(out_file, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["date", "up_count", "down_count", "up_vol", "down_vol", "trin_raw", "trin_ma30"])
         for row in results:
             writer.writerow([row["date"], row["up_count"], row["down_count"], row["up_vol"], row["down_vol"], row["trin_raw"], row["trin_ma30"]])
             
-    print(f"🎉 成功生成 {out_file}，包含近 {len(results)} 个交易日的数据。")
+    print(f"🎉 成功生成 {out_file}，包含全部 {len(results)} 个交易日的数据。")
 
 if __name__ == "__main__":
     main()
