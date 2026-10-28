@@ -18,9 +18,7 @@ def parse_tdx_day(file_path):
                 if len(date_str) != 8 or not date_str.isdigit():
                     continue
                 
-                # 格式化日期为 YYYY-MM-DD
                 formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
-                
                 close = row[4] / 100.0
                 volume = row[6]
                 
@@ -34,13 +32,9 @@ def parse_tdx_day(file_path):
     return records
 
 def main():
-    print("开始解析全历史A股数据...")
+    print("开始解析A股历史数据...")
     
     base_dir = "tdx_data"
-    if not os.path.exists(base_dir):
-        print(f"❌ 错误: 找不到 {base_dir} 目录！")
-        return
-
     day_files = []
     for root, dirs, files in os.walk(base_dir):
         for file in files:
@@ -57,14 +51,13 @@ def main():
             continue
         code = match.group(1)
         
-        # 过滤规则：仅限沪深A股
         is_sh_a = code.startswith(("600", "601", "603", "605", "688"))
         is_sz_a = code.startswith(("000", "001", "002", "003", "300", "301"))
         if not (is_sh_a or is_sz_a):
             continue
             
         stock_data = parse_tdx_day(file_path)
-        if len(stock_data) < 60:
+        if len(stock_data) < 5: # 放宽次新股限制
             continue
             
         for i in range(1, len(stock_data)):
@@ -85,15 +78,21 @@ def main():
                 
         valid_stock_count += 1
 
-    print(f"✅ 过滤后，真正参与计算的A股数量：{valid_stock_count} 只。")
+    print(f"✅ 参与计算的A股数量：{valid_stock_count} 只。")
 
-    # 获取全部日期并排序（去掉了限制 60 天的切片）
-    sorted_dates = sorted(list(daily_data.keys()))
+    # 获取全部日期并排序
+    all_sorted_dates = sorted(list(daily_data.keys()))
+    print(f"📅 压缩包中包含的全部历史天数：{len(all_sorted_dates)} 天。")
+    if len(all_sorted_dates) > 0:
+        print(f"📅 历史最早日期：{all_sorted_dates[0]}，最新日期：{all_sorted_dates[-1]}")
+
+    # 核心：只取最后 180 天
+    target_dates = all_sorted_dates[-180:]
     
     results = []
-    trin_history = [] # 用于计算 30 日平滑均线
+    trin_history = []
     
-    for date in sorted_dates:
+    for date in target_dates:
         d = daily_data[date]
         up_c = d["up_count"]
         down_c = d["down_count"]
@@ -103,11 +102,11 @@ def main():
         if down_c > 0 and down_v > 0 and up_v > 0:
             trin = (up_c / down_c) / (up_v / down_v)
         else:
-            trin = 1.0 # 无数据时给中性值
+            trin = 1.0
             
         trin_history.append(trin)
         
-        # 计算 30 日平滑均线 (MA30)
+        # 计算 30 日平滑
         if len(trin_history) >= 30:
             ma30 = sum(trin_history[-30:]) / 30.0
         else:
@@ -123,15 +122,15 @@ def main():
             "trin_ma30": round(ma30, 4)
         })
 
-    # 保存文件，改名为全历史数据
-    out_file = "trin_history.csv"
+    # 保存为新的文件，防止和旧的混淆
+    out_file = "trin_180d.csv"
     with open(out_file, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["date", "up_count", "down_count", "up_vol", "down_vol", "trin_raw", "trin_ma30"])
         for row in results:
             writer.writerow([row["date"], row["up_count"], row["down_count"], row["up_vol"], row["down_vol"], row["trin_raw"], row["trin_ma30"]])
             
-    print(f"🎉 成功生成 {out_file}，包含全部 {len(results)} 个交易日的历史数据。")
+    print(f"🎉 成功生成 {out_file}，包含近 {len(results)} 个交易日的数据。")
 
 if __name__ == "__main__":
     main()
