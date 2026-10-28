@@ -1,4 +1,4 @@
-name: 计算全历史TRIN
+name: 计算2020至今TRIN并画图
 
 on:
   workflow_dispatch:
@@ -20,6 +20,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: 安装画图库
+        run: pip install matplotlib
+
       - name: 下载通达信数据包
         run: |
           curl -L -o hsjday.1.zip https://github.com/17601732/open-stock-data/releases/download/tdx-data/hsjday.1.zip
@@ -31,6 +34,8 @@ jobs:
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          rm -f trin_30d.csv trin_180d.csv
-          git add trin_history.csv
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update TRIN data" && git push)
+          # 清理旧文件
+          rm -f trin_30d.csv trin_180d.csv trin_history.csv
+          # 提交新生成的文件
+          git add trin_2020_now.csv trin_chart.png
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update TRIN chart and 2020-present data" && git push)
