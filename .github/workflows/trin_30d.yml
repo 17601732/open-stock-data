@@ -1,4 +1,4 @@
-name: 计算30日TRIN
+name: 计算全历史TRIN
 
 on:
   workflow_dispatch:
@@ -20,18 +20,9 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: 下载并解压通达信数据
+      - name: 下载通达信数据包
         run: |
-          # 安装 7z 解压工具
-          sudo apt-get update && sudo apt-get install -y p7zip-full
-          # 下载你 Release 里的文件
           curl -L -o hsjday.1.zip https://github.com/17601732/open-stock-data/releases/download/tdx-data/hsjday.1.zip
-          # 创建目标文件夹
-          mkdir -p tdx_data
-          # 使用 7z 解压
-          7z x hsjday.1.zip -otdx_data/ -y
-          # 打印解压后的目录，方便你检查是否解压成功
-          ls -l tdx_data/
 
       - name: 运行解析与计算脚本
         run: python scripts/calc_trin_30d.py
@@ -40,5 +31,6 @@ jobs:
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          git add trin_30d.csv
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update TRIN data from TDX" && git push)
+          rm -f trin_30d.csv trin_180d.csv
+          git add trin_history.csv
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update TRIN data" && git push)
