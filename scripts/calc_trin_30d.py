@@ -18,11 +18,14 @@ def parse_tdx_day(file_path):
                 if len(date_str) != 8 or not date_str.isdigit():
                     continue
                 
+                # 格式化日期为 YYYY-MM-DD
+                formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+                
                 close = row[4] / 100.0
                 volume = row[6]
                 
                 records.append({
-                    "date": date_str,
+                    "date": formatted_date,
                     "close": close,
                     "volume": volume
                 })
@@ -31,7 +34,7 @@ def parse_tdx_day(file_path):
     return records
 
 def main():
-    print("开始智能解析A股数据...")
+    print("开始解析全历史A股数据...")
     
     base_dir = "tdx_data"
     if not os.path.exists(base_dir):
@@ -44,26 +47,19 @@ def main():
             if file.lower().endswith('.day'):
                 day_files.append(os.path.join(root, file))
 
-    print(f"📂 共搜索到 {len(day_files)} 个 .day 文件。")
-    if len(day_files) > 0:
-        print(f"🔍 随便看几个文件的真实名字: {[os.path.basename(f) for f in day_files[:5]]}")
-
     daily_data = defaultdict(lambda: {"up_count": 0, "down_count": 0, "up_vol": 0.0, "down_vol": 0.0})
-    
     valid_stock_count = 0
+    
     for file_path in day_files:
         filename = os.path.basename(file_path).lower()
-        
-        # 智能提取 6 位数字代码 (兼容 sh600000.day 或 600000.day)
         match = re.search(r'(\d{6})\.day$', filename)
         if not match:
             continue
         code = match.group(1)
         
-        # 核心白名单：只保留真正的沪深 A 股代码
+        # 过滤规则：仅限沪深A股
         is_sh_a = code.startswith(("600", "601", "603", "605", "688"))
         is_sz_a = code.startswith(("000", "001", "002", "003", "300", "301"))
-        
         if not (is_sh_a or is_sz_a):
             continue
             
@@ -91,12 +87,11 @@ def main():
 
     print(f"✅ 过滤后，真正参与计算的A股数量：{valid_stock_count} 只。")
 
-    if valid_stock_count == 0:
-        print("⚠️ 没有任何股票进入计算池，请检查上面的文件名示例！")
-        return
-
-    sorted_dates = sorted(list(daily_data.keys()))[-60:]
+    # 获取全部日期并排序（去掉了限制 60 天的切片）
+    sorted_dates = sorted(list(daily_data.keys()))
+    
     results = []
+    trin_history = [] # 用于计算 30 日平滑均线
     
     for date in sorted_dates:
         d = daily_data[date]
@@ -108,7 +103,15 @@ def main():
         if down_c > 0 and down_v > 0 and up_v > 0:
             trin = (up_c / down_c) / (up_v / down_v)
         else:
-            trin = 0.0
+            trin = 1.0 # 无数据时给中性值
+            
+        trin_history.append(trin)
+        
+        # 计算 30 日平滑均线 (MA30)
+        if len(trin_history) >= 30:
+            ma30 = sum(trin_history[-30:]) / 30.0
+        else:
+            ma30 = sum(trin_history) / len(trin_history)
             
         results.append({
             "date": date,
@@ -116,17 +119,19 @@ def main():
             "down_count": down_c,
             "up_vol": up_v,
             "down_vol": down_v,
-            "trin_raw": round(trin, 4)
+            "trin_raw": round(trin, 4),
+            "trin_ma30": round(ma30, 4)
         })
 
-    out_file = "trin_30d.csv"
+    # 保存文件，改名为全历史数据
+    out_file = "trin_history.csv"
     with open(out_file, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["date", "up_count", "down_count", "up_vol", "down_vol", "trin_raw"])
+        writer.writerow(["date", "up_count", "down_count", "up_vol", "down_vol", "trin_raw", "trin_ma30"])
         for row in results:
-            writer.writerow([row["date"], row["up_count"], row["down_count"], row["up_vol"], row["down_vol"], row["trin_raw"]])
+            writer.writerow([row["date"], row["up_count"], row["down_count"], row["up_vol"], row["down_vol"], row["trin_raw"], row["trin_ma30"]])
             
-    print(f"🎉 成功生成 {out_file}，包含近 {len(results)} 个交易日的数据。")
+    print(f"🎉 成功生成 {out_file}，包含全部 {len(results)} 个交易日的历史数据。")
 
 if __name__ == "__main__":
     main()
