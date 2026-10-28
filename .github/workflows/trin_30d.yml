@@ -1,9 +1,9 @@
-name: 计算2020至今TRIN并画图
+name: 每日增量计算TRIN
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 8 * * 1-5'
+    - cron: '10 8 * * 1-5'  # 北京时间 16:10 运行
 
 jobs:
   build:
@@ -23,19 +23,12 @@ jobs:
       - name: 安装画图库
         run: pip install matplotlib
 
-      - name: 下载通达信数据包
-        run: |
-          curl -L -o hsjday.1.zip https://github.com/17601732/open-stock-data/releases/download/tdx-data/hsjday.1.zip
-
-      - name: 运行解析与计算脚本
+      - name: 运行增量计算脚本
         run: python scripts/calc_trin_30d.py
 
       - name: 提交并保存结果
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          # 清理旧文件
-          rm -f trin_30d.csv trin_180d.csv trin_history.csv
-          # 提交新生成的文件
           git add trin_2020_now.csv trin_chart.png
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update TRIN chart and 2020-present data" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update daily TRIN data and chart" && git push)
