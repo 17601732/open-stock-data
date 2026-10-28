@@ -1,6 +1,7 @@
 # ruff: noqa
 import csv
 import os
+import re
 import struct
 from collections import defaultdict
 
@@ -30,11 +31,11 @@ def parse_tdx_day(file_path):
     return records
 
 def main():
-    print("开始精准解析A股数据...")
+    print("开始智能解析A股数据...")
     
     base_dir = "tdx_data"
     if not os.path.exists(base_dir):
-        print(f"错误: 找不到 {base_dir} 目录！")
+        print(f"❌ 错误: 找不到 {base_dir} 目录！")
         return
 
     day_files = []
@@ -43,7 +44,9 @@ def main():
             if file.lower().endswith('.day'):
                 day_files.append(os.path.join(root, file))
 
-    print(f"共找到 {len(day_files)} 个 .day 文件（包含股票、指数、基金等）。")
+    print(f"📂 共搜索到 {len(day_files)} 个 .day 文件。")
+    if len(day_files) > 0:
+        print(f"🔍 随便看几个文件的真实名字: {[os.path.basename(f) for f in day_files[:5]]}")
 
     daily_data = defaultdict(lambda: {"up_count": 0, "down_count": 0, "up_vol": 0.0, "down_vol": 0.0})
     
@@ -51,9 +54,15 @@ def main():
     for file_path in day_files:
         filename = os.path.basename(file_path).lower()
         
-        # 核心过滤：只保留真正的沪深 A 股
-        is_sh_a = filename.startswith(("sh600", "sh601", "sh603", "sh605", "sh688"))
-        is_sz_a = filename.startswith(("sz000", "sz001", "sz002", "sz003", "sz300", "sz301"))
+        # 智能提取 6 位数字代码 (兼容 sh600000.day 或 600000.day)
+        match = re.search(r'(\d{6})\.day$', filename)
+        if not match:
+            continue
+        code = match.group(1)
+        
+        # 核心白名单：只保留真正的沪深 A 股代码
+        is_sh_a = code.startswith(("600", "601", "603", "605", "688"))
+        is_sz_a = code.startswith(("000", "001", "002", "003", "300", "301"))
         
         if not (is_sh_a or is_sz_a):
             continue
@@ -80,7 +89,11 @@ def main():
                 
         valid_stock_count += 1
 
-    print(f"过滤后，真正参与计算的A股数量：{valid_stock_count} 只。")
+    print(f"✅ 过滤后，真正参与计算的A股数量：{valid_stock_count} 只。")
+
+    if valid_stock_count == 0:
+        print("⚠️ 没有任何股票进入计算池，请检查上面的文件名示例！")
+        return
 
     sorted_dates = sorted(list(daily_data.keys()))[-60:]
     results = []
@@ -113,7 +126,7 @@ def main():
         for row in results:
             writer.writerow([row["date"], row["up_count"], row["down_count"], row["up_vol"], row["down_vol"], row["trin_raw"]])
             
-    print(f"计算完成，已生成 {out_file}。")
+    print(f"🎉 成功生成 {out_file}，包含近 {len(results)} 个交易日的数据。")
 
 if __name__ == "__main__":
     main()
