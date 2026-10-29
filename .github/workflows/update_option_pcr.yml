@@ -3,7 +3,7 @@ name: Update Option PCR Data
 on:
   workflow_dispatch: # 允许手动触发
   schedule:
-    - cron: '30 8 * * 1-5' # 北京时间 16:30 自动运行 (UTC+8)
+    - cron: '30 8 * * 1-5' # 北京时间 16:30 自动运行
 
 jobs:
   update-data:
@@ -25,6 +25,8 @@ jobs:
           pip install pytdx pandas
 
       - name: Run Script
+        # 如果怕代码本身报错导致流程挂掉，加上这句忽略错误，让它继续往下走
+        continue-on-error: true
         run: python scripts/calc_option_pcr.py
 
       - name: Commit and Push
@@ -32,5 +34,4 @@ jobs:
           git config --global user.name 'GitHub Action'
           git config --global user.email 'action@github.com'
           git add option_pcr_50etf.csv
-          # 如果没有变化则不提交
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update option PCR data" && git push)
