@@ -2,6 +2,11 @@ name: 每日增量计算TRIN
 
 on:
   workflow_dispatch:
+    inputs:
+      target_date:
+        description: '输入指定日期 (格式: YYYYMMDD，留空则抓取最新交易日)'
+        required: false
+        default: ''
   schedule:
     - cron: '10 8 * * 1-5'  # 北京时间 16:10 运行
 
@@ -21,14 +26,18 @@ jobs:
           python-version: '3.12'
 
       - name: 安装画图库
-        run: pip install matplotlib
+        run: pip install matplotlib requests
 
       - name: 运行增量计算脚本
+        # 把用户输入的日期传给脚本，如果为空就传空字符串
+        env:
+          TARGET_DATE: ${{ github.event.inputs.target_date }}
         run: python scripts/calc_trin_30d.py
 
       - name: 提交并保存结果
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
+          git pull --rebase origin main || true
           git add trin_2020_now.csv trin_chart.png
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update daily TRIN data and chart" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update TRIN data for target date" && git push)
