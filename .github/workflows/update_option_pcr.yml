@@ -1,15 +1,15 @@
 name: Update Option PCR Data
 
 on:
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch: # 允许在网页上手动点击运行
   schedule:
-    - cron: '30 8 * * 1-5' # 北京时间 16:30 自动运行
+    - cron: '30 8 * * 1-5' # 每天北京时间 16:30 自动运行 (UTC+8)
 
 jobs:
   update-data:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 允许 Action 提交代码
+      contents: write # 必须要有这个权限，才能 git push 回仓库
 
     steps:
       - name: Checkout Repository
@@ -22,11 +22,11 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install pytdx pandas
+          python -m pip install --upgrade pip
+          pip install akshare pandas
 
       - name: Run Script
-        # 如果怕代码本身报错导致流程挂掉，加上这句忽略错误，让它继续往下走
-        continue-on-error: true
+        # 直接运行 AKShare 脚本，因为它很稳定
         run: python scripts/calc_option_pcr.py
 
       - name: Commit and Push
@@ -34,4 +34,5 @@ jobs:
           git config --global user.name 'GitHub Action'
           git config --global user.email 'action@github.com'
           git add option_pcr_50etf.csv
+          # 下面这行代码的意思是：如果有文件变化才提交，没变化就跳过，防止报错
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update option PCR data" && git push)
