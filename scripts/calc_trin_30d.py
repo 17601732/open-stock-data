@@ -4,7 +4,6 @@ import os
 import time
 import urllib.request
 import json
-import math
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -22,7 +21,7 @@ def get_latest_trading_date():
         target = now_bj
         
     # 如果是周末，退回到周五
-    while target.weekday() >= 5: # 5是周六，6是周日
+    while target.weekday() >= 5: 
         target -= timedelta(days=1)
         
     return target.strftime("%Y%m%d")
@@ -33,9 +32,9 @@ def fetch_netease_data(date_str):
     up_count, down_count = 0, 0
     up_vol, down_vol = 0.0, 0.0
     
-    # 网易接口分页参数
     page = 0
     while True:
+        # 网易接口原生支持传入 date 参数获取历史某一天的全市场快照
         url = f"http://quotes.money.163.com/hs/service/diyrank.php?host=http%3A%2F%2Fquotes.money.163.com%2Fhs%2Fservice%2Fdiyrank.php&page={page}&query=STYPE%3AEQA&fields=NO%2CSYMBOL%2CNAME%2CPRICE%2CPERCENT%2CVOLUME&sort=SYMBOL&order=asc&count=100&type=query&date={date_str}"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         
@@ -46,7 +45,7 @@ def fetch_netease_data(date_str):
             
             if not stocks:
                 if page == 0:
-                    print("❌ 未获取到任何数据，可能这天休市或接口异常。")
+                    print(f"⚠️ 未获取到 {date_str} 的任何数据，可能休市或接口异常。")
                     return None
                 break
                 
@@ -71,10 +70,10 @@ def fetch_netease_data(date_str):
             
         except Exception as e:
             print(f"抓取第 {page} 页失败: {e}")
-            break
+            return None
             
     if down_count == 0 or down_vol == 0:
-        print("数据异常（可能全市场停牌或休市），取消写入。")
+        print(f"⚠️ {date_str} 数据异常（下跌家数为0），可能停牌。")
         return None
         
     trin = (up_count / down_count) / (up_vol / down_vol)
@@ -83,18 +82,14 @@ def fetch_netease_data(date_str):
 def update_csv_and_plot(date_str, up_count, down_count, up_vol, down_vol, trin_raw):
     csv_file = "trin_2020_now.csv"
     rows = []
-    
-    # 将 YYYYMMDD 转换为 YYYY-MM-DD
     formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
     
-    # 1. 读取现有数据
     if os.path.exists(csv_file):
         with open(csv_file, "r", newline="") as f:
             reader = csv.reader(f)
             header = next(reader)
             rows = list(reader)
 
-    # 2. 检查该日期是否已存在，存在则覆盖，不存在则追加
     date_exists = False
     for row in rows:
         if row[0] == formatted_date:
@@ -104,7 +99,7 @@ def update_csv_and_plot(date_str, up_count, down_count, up_vol, down_vol, trin_r
             row[4] = str(int(down_vol))
             row[5] = str(round(trin_raw, 4))
             date_exists = True
-            print(f"已覆盖历史数据: {formatted_date}")
+            print(f"✅ 已覆盖历史数据: {formatted_date}")
             break
             
     if not date_exists:
@@ -112,12 +107,10 @@ def update_csv_and_plot(date_str, up_count, down_count, up_vol, down_vol, trin_r
             formatted_date, str(up_count), str(down_count), 
             str(int(up_vol)), str(int(down_vol)), str(round(trin_raw, 4)), "0"
         ])
-        print(f"已追加新数据: {formatted_date}")
+        print(f"✅ 已追加新数据: {formatted_date}")
 
-    # 3. 按日期排序（防止插入历史日期后顺序错乱）
     rows.sort(key=lambda x: x[0])
 
-    # 4. 重新计算 MA30
     trin_history = []
     for row in rows:
         trin_val = float(row[5])
@@ -125,15 +118,12 @@ def update_csv_and_plot(date_str, up_count, down_count, up_vol, down_vol, trin_r
         ma30 = sum(trin_history[-30:]) / min(30, len(trin_history))
         row[6] = str(round(ma30, 4))
 
-    # 5. 写回 CSV
     with open(csv_file, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["date", "up_count", "down_count", "up_vol", "down_vol", "trin_raw", "trin_ma30"])
         writer.writerows(rows)
-
-    print(f"✅ CSV 已更新。{formatted_date} TRIN: {trin_raw:.4f}")
-
-    # 6. 重新绘制图表
+    
+    # 绘制图表
     print("🎨 正在重绘折线图...")
     dates = [datetime.strptime(r[0], "%Y-%m-%d") for r in rows]
     trin_raw_list = [float(r[5]) for r in rows]
@@ -159,21 +149,21 @@ def update_csv_and_plot(date_str, up_count, down_count, up_vol, down_vol, trin_r
     print("✅ 图表已更新。")
 
 if __name__ == "__main__":
-    # 从环境变量获取日期，如果是通过 schedule 触发的，这里是空字符串
     target_date = os.environ.get("TARGET_DATE", "").strip()
     
     if not target_date:
-        # 没输入日期，智能推算最新交易日
         target_date = get_latest_trading_date()
         print(f"未指定日期，系统自动选择最新交易日: {target_date}")
     else:
-        # 校验格式
+        target_date = target_date.replace("-", "").replace("/", "")
         if len(target_date) != 8 or not target_date.isdigit():
-            print("❌ 日期格式错误，请使用 YYYYMMDD 格式，如 20260921")
-            exit(1)
+            raise ValueError("日期格式错误，请使用 YYYYMMDD 格式，如 20260921")
         print(f"收到指定日期指令: {target_date}")
         
     result = fetch_netease_data(target_date)
-    if result:
-        u_c, d_c, u_v, d_v, t_raw = result
-        update_csv_and_plot(target_date, u_c, d_c, u_v, d_v, t_raw)
+    
+    if result is None:
+        raise RuntimeError("抓取数据失败，请检查日志。如果持续失败，可能是该日期非交易日。")
+        
+    u_c, d_c, u_v, d_v, t_raw = result
+    update_csv_and_plot(target_date, u_c, d_c, u_v, d_v, t_raw)
