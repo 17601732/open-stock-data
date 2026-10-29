@@ -1,0 +1,36 @@
+name: Update Option PCR Data
+
+on:
+  workflow_dispatch: # 允许手动触发
+  schedule:
+    - cron: '30 8 * * 1-5' # 北京时间 16:30 自动运行 (UTC+8)
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 允许 Action 提交代码
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install pytdx pandas
+
+      - name: Run Script
+        run: python scripts/calc_option_pcr.py
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name 'GitHub Action'
+          git config --global user.email 'action@github.com'
+          git add option_pcr_50etf.csv
+          # 如果没有变化则不提交
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update option PCR data" && git push)
