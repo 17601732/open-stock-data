@@ -122,14 +122,17 @@ def _index_from_tx(code: str, days: int = 320, start: str | None = None,
 
 def _index_full_history(code: str) -> pd.DataFrame:
     """按 2 年窗口分段抓全历史(腾讯单次窗口上限约 640 根, 2 年约 490 根)。"""
+
+    def _window(s: str, e: str) -> pd.DataFrame:
+        return _index_from_tx(code, 640, s, e)
+
     start = pd.Timestamp(HISTORY_START)
     end = pd.Timestamp.now().normalize()
     frames: list[pd.DataFrame] = []
     while start <= end:
         w_end = min(start + pd.DateOffset(years=2) - pd.Timedelta(days=1), end)
-        frames.append(_retry(
-            lambda: _index_from_tx(code, 640, str(start.date()), str(w_end.date())),
-            tries=3, wait=5))
+        s, e = str(start.date()), str(w_end.date())
+        frames.append(_retry(lambda s=s, e=e: _window(s, e), tries=3, wait=5))
         start = w_end + pd.Timedelta(days=1)
     out = pd.concat(frames, ignore_index=True).drop_duplicates("date")
     return out.sort_values("date").reset_index(drop=True)
