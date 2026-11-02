@@ -32,3 +32,14 @@ bars/
 # Temporary
 *.tmp
 *.bak
+
+# Credentials — never commit tokens
+*token*
+github_token.txt
+*.env
+.env
+
+# Radar raw inputs (only the small snapshot.json is tracked)
+data/radar/*.parquet
+data/radar/*.csv
+data/radar/fetch_status.json

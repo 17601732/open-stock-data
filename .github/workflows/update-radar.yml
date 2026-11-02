@@ -1,0 +1,75 @@
+name: Update Radar Snapshot
+
+on:
+  schedule:
+    # 北京时间 18:30 (UTC 10:30), 收盘后数据定稿
+    - cron: "30 10 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "全量重建(忽略已有增量)"
+        required: false
+        default: "false"
+      with_holders:
+        description: "额外抓取股东增减持(首次全量约 5 分钟, 有缓存时只补最近 2 个月)"
+        required: false
+        default: "true"
+
+jobs:
+  update-radar:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # 原始 Parquet/CSV 不进 git, 用 Actions 缓存实现"只抓增量"; 缓存丢失时自动退化为全量
+      - name: Restore radar raw cache
+        uses: actions/cache@v4
+        with:
+          path: data/radar
+          key: radar-raw-${{ github.run_id }}
+          restore-keys: |
+            radar-raw-
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Update radar inputs
+        env:
+          INPUT_FULL: ${{ github.event.inputs.full || 'false' }}
+          INPUT_HOLDERS: ${{ github.event.inputs.with_holders || 'true' }}
+        run: |
+          ARGS=""
+          if [ "$INPUT_FULL" = "true" ]; then ARGS="$ARGS --full"; fi
+          if [ "$INPUT_HOLDERS" = "true" ]; then ARGS="$ARGS --with-holders"; fi
+          uv run python -m scripts.update_radar $ARGS
+
+      - name: Verify snapshot
+        run: |
+          test -s data/radar/snapshot.json
+          python -c "import json,sys;d=json.load(open('data/radar/snapshot.json'));print('cutoff',d['meta']['data_cutoff'],'score',d['latest']['score'],'indicators',len(d['indicators']),'signals',len(d['signals']))"
+
+      - name: Commit snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/radar/snapshot.json
+          if git diff --cached --quiet; then
+            echo "快照无变化, 跳过提交"
+          else
+            git commit -m "chore(radar): update snapshot $(date -u +%Y-%m-%d)"
+            git push
+          fi
+
+      - name: Upload snapshot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: radar-snapshot
+          path: data/radar/snapshot.json
+          retention-days: 7
