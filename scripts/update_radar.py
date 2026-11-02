@@ -25,6 +25,11 @@ def run(full: bool = False, skip_stocks: bool = False, with_holders: bool = Fals
         android_assets: Path | None = None) -> dict:
     """执行完整流水线, 返回快照字典。"""
     t0 = time.time()
+    # 缓存为空(如 Actions 首次运行/缓存丢失)时自动退化为全量,
+    # 否则只有最近约 60 个交易日的数据, 滚动分位无法满足 min_days, 综合分会为空
+    if not full and store.read_frame("index_daily.parquet").empty:
+        full = True
+        logger.warning("未检测到本地原始数据, 自动切换为全量模式")
     logger.info("1/4 抓取输入数据")
     fetch_inputs.fetch_all(full=full, with_holders=with_holders, skip_stocks=skip_stocks)
 
