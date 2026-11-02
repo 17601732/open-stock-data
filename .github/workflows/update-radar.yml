@@ -53,7 +53,7 @@ jobs:
       - name: Verify snapshot
         run: |
           test -s data/radar/snapshot.json
-          python -c "import json,sys;d=json.load(open('data/radar/snapshot.json'));print('cutoff',d['meta']['data_cutoff'],'score',d['latest']['score'],'indicators',len(d['indicators']),'signals',len(d['signals']))"
+          uv run python -c "import json;d=json.load(open('data/radar/snapshot.json'));print('cutoff',d['meta']['data_cutoff'],'score',d['latest']['score'],'indicators',len(d['indicators']),'signals',len(d['signals']))"
 
       - name: Commit snapshot
         run: |
