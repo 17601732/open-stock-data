@@ -92,13 +92,14 @@ def _index_from_sina(code: str, days: int = 320) -> pd.DataFrame:
     })
 
 
-def _index_from_tx(code: str, days: int = 320) -> pd.DataFrame:
-    """腾讯指数日线(直连 K 线接口, 含成交额)。"""
+def _index_from_tx(code: str, days: int = 320, start: str | None = None,
+                   end: str | None = None) -> pd.DataFrame:
+    """腾讯指数日线(直连 K 线接口, 含成交额); 可指定日期窗口。"""
     import requests
 
     r = requests.get(
         "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
-        params={"param": f"{_index_symbol(code)},day,,,{days},"},
+        params={"param": f"{_index_symbol(code)},day,{start or ''},{end or ''},{days},"},
         timeout=20,
         headers={"User-Agent": "Mozilla/5.0"},
     )
@@ -119,6 +120,21 @@ def _index_from_tx(code: str, days: int = 320) -> pd.DataFrame:
     })
 
 
+def _index_full_history(code: str) -> pd.DataFrame:
+    """按 2 年窗口分段抓全历史(腾讯单次窗口上限约 640 根, 2 年约 490 根)。"""
+    start = pd.Timestamp(HISTORY_START)
+    end = pd.Timestamp.now().normalize()
+    frames: list[pd.DataFrame] = []
+    while start <= end:
+        w_end = min(start + pd.DateOffset(years=2) - pd.Timedelta(days=1), end)
+        frames.append(_retry(
+            lambda: _index_from_tx(code, 640, str(start.date()), str(w_end.date())),
+            tries=3, wait=5))
+        start = w_end + pd.Timedelta(days=1)
+    out = pd.concat(frames, ignore_index=True).drop_duplicates("date")
+    return out.sort_values("date").reset_index(drop=True)
+
+
 def fetch_index_daily(full: bool = False) -> pd.DataFrame:
     """抓取沪深300与上证指数日线(新浪 → 腾讯回退), 增量补齐缺失日期。"""
     existing = store.read_frame("index_daily.parquet")
@@ -127,18 +143,27 @@ def fetch_index_daily(full: bool = False) -> pd.DataFrame:
     for code in RADAR_CONFIG["index_codes"]:
         src = None
         last_err: Exception | None = None
-        for name, fn in (("tx", _index_from_tx), ("sina", _index_from_sina)):
-            for attempt in range(2):
-                try:
-                    src = fn(code, days)
-                    logger.info("指数 %s 来源 %s (%d 行)", code, name, len(src))
+        if full:
+            # 新浪/腾讯单次请求最多约 1000 根, 全历史必须分段
+            try:
+                src = _index_full_history(code)
+                logger.info("指数 %s 来源 tx 全历史 (%d 行)", code, len(src))
+            except Exception as exc:
+                last_err = exc
+                logger.warning("指数 %s 全历史抓取失败, 退回单段模式: %s", code, str(exc)[:80])
+        if src is None:
+            for name, fn in (("tx", _index_from_tx), ("sina", _index_from_sina)):
+                for attempt in range(2):
+                    try:
+                        src = fn(code, days)
+                        logger.info("指数 %s 来源 %s (%d 行)", code, name, len(src))
+                        break
+                    except Exception as exc:
+                        last_err = exc
+                        logger.warning("指数 %s 来源 %s 第%d次失败: %s", code, name, attempt + 1, str(exc)[:80])
+                        time.sleep(1)
+                if src is not None:
                     break
-                except Exception as exc:
-                    last_err = exc
-                    logger.warning("指数 %s 来源 %s 第%d次失败: %s", code, name, attempt + 1, str(exc)[:80])
-                    time.sleep(1)
-            if src is not None:
-                break
         if src is None:
             logger.error("指数 %s 全部来源失败: %s", code, last_err)
             continue
