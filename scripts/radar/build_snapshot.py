@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from scripts.radar import pattern_signal, store
+from scripts.radar import board_score, pattern_signal, store
 from scripts.radar.config import RADAR_CONFIG
 from scripts.radar.indicators import (
     confirm_signals,
@@ -305,6 +305,12 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
         logger.warning("板块形态模块失败: %s", str(exc)[:160])
         pattern = {"available": False, "reason": str(exc)[:160]}
 
+    try:
+        boards = board_score.build_board_module(include_history=include_history)
+    except Exception as exc:
+        logger.warning("板块顶底模块失败: %s", str(exc)[:160])
+        boards = {"available": False, "reason": str(exc)[:160]}
+
     trin_info = trin_source_info()
     indicator_gaps: dict[str, dict] = {}
     if trin_info.get("missing_dates") or trin_info.get("status") != "ok":
@@ -333,7 +339,7 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
             "ex_rights": status.get("ex_rights"),
             "ex_rights_flags": status.get("ex_rights_flags"),
             "snapshot_url": SNAPSHOT_URL,
-            "schema_version": 3,
+            "schema_version": 4,
         },
         "latest": {
             "date": latest_date,
@@ -356,6 +362,7 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
         "score_ta": score_ta,
         "signals_confirmed": signals_confirmed,
         "pattern": pattern,
+        "boards": boards,
         "tech": tech or {"available": False},
         "tech_abtest": abtest or {"available": False},
     }

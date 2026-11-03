@@ -70,6 +70,30 @@ RADAR_CONFIG: dict = {
         "divergence": {"lookback": 60, "gap": 20},
         "score": {"blend_weight_tech": 0.2, "calibrate_min_days": 60},
     },
+    # 板块顶底(独立模块, 不参与大盘综合分): 每个板块用自身历史分位打分
+    "board": {
+        "top_threshold": 85,
+        "bottom_threshold": 15,
+        "cooldown_days": 20,
+        "percentile": {"window_days": 2520, "min_days": 120},
+        "weights": {
+            "up_ratio": {"name": "上涨家数占比", "weight": 1, "direction": "hot_high"},
+            "above60_ratio": {"name": "站上MA60家数占比", "weight": 1, "direction": "hot_high"},
+            "amount_share": {"name": "板块成交额占全市场比", "weight": 1, "direction": "hot_high"},
+            "vol_mult": {"name": "板块成交额/20日均额", "weight": 1, "direction": "hot_high"},
+            "position": {"name": "等权指数距250日高点的位置", "weight": 1, "direction": "hot_high"},
+            "ma60_dev": {"name": "等权指数距60日均线偏离", "weight": 1, "direction": "hot_high"},
+            "pattern_share": {"name": "放量长上影命中占比", "weight": 1, "direction": "hot_high"},
+        },
+        "validation": {
+            "forward_days": [20, 60, 120],
+            "alpha": 0.05,
+            "note": ("每个板块单独检验并做 Bonferroni/BH-FDR 多重比较校正; "
+                     "另做同日横截面检验(触发顶信号的板块之后是否系统性跑输未触发板块)"),
+        },
+        "note": ("板块成员为申万一级行业当前成分快照, 按当前成分回溯; "
+                 "个股行情仅覆盖约 3 年, 历史分位为扩展窗口, 不能与大盘 2015 起的结论直接对比"),
+    },
     # 板块「放量长上影线」风险提醒(独立模块, 不参与综合分)
     "pattern": {
         "shadow_ratio": 0.5,        # 上影线 / 当日振幅 ≥ 0.5: 一半以上振幅落在上影线
