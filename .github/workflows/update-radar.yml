@@ -87,7 +87,7 @@ jobs:
           assert 4800 <= total <= 5600, f"当日沪深A股家数异常: total={total}, {bc}"
           checks = (d['meta'].get('tdx') or {}).get('checks') or {}
           if not checks.get('within_expected_range'):
-              print(f"::warning::家数 {total} 低于参考区间 5300-5500(有成交口径, 停牌/退市不计)")
+              print(f"::warning::家数 {total} 低于参考区间 5100-5500(有成交口径, 停牌/退市不计)")
           if not checks.get('peak_below_6000'):
               raise SystemExit(f"历史家数峰值异常: {checks.get('max_total')} @ {checks.get('max_total_date')}")
           src = d['meta'].get('stock_source')

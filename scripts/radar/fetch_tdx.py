@@ -385,6 +385,18 @@ def fetch_tdx(force: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
     out_stock = store.DATA_DIR / "tdx_stock.parquet"
     try:
         zp = ensure_zip(force)
+        # 缓存包可能来自被截断/被反爬页替换的旧下载: 先扫成员, 0 个则丢弃重下
+        members = _parse_members(zp)
+        if not members:
+            logger.warning("缓存包内无 A 股 .day, 删除后重新下载")
+            zp.unlink(missing_ok=True)
+            zp = ensure_zip(force=True)
+            members = _parse_members(zp)
+            if not members:
+                with zipfile.ZipFile(zp) as zf:
+                    sample = zf.namelist()[:5]
+                raise ValueError(f"包内无可识别 A 股 .day (%.1f MB), namelist 样例={sample}"
+                                 % (zp.stat().st_size / 1048576))
         prev = store.read_status().get("tdx", {})
         # 解析产物比 zip 新 + 口径版本一致 → 复用; 否则重解析(防旧缓存污染)
         cached = (
