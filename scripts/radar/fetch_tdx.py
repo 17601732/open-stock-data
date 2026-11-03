@@ -276,6 +276,58 @@ def _read_day(zf: zipfile.ZipFile, name: str) -> np.ndarray:
     return np.frombuffer(raw[: n * RECORD_BYTES], dtype=DAY_DTYPE)
 
 
+# 包内指数 .day -> 内部代码(上证指数用 000001, 与 index_codes 一致; 999999 为通达信别名)
+INDEX_MEMBERS = {"sh000001": "000001", "sh000300": "000300"}
+
+
+def parse_index_zip(zip_path: Path) -> pd.DataFrame:
+    """从全量包提取上证指数/沪深300 日线(权威口径, 含成交量与成交额)。"""
+    rows = []
+    with zipfile.ZipFile(zip_path) as zf:
+        names = {n.replace("\\", "/").split("/")[-1]: n for n in zf.namelist()}
+        for stem, code in INDEX_MEMBERS.items():
+            entry = names.get(f"{stem}.day")
+            if entry is None:
+                continue
+            a = _read_day(zf, entry)
+            if not len(a):
+                continue
+            ok = (a["close"] > 0) & (a["open"] > 0) & (a["high"] > 0) & (a["low"] > 0)
+            a = a[ok]
+            if not len(a):
+                continue
+            rows.append(pd.DataFrame({
+                "code": code,
+                "date": pd.to_datetime(pd.Series(a["date"]).astype(str),
+                                       format="%Y%m%d").dt.strftime("%Y-%m-%d"),
+                "open": a["open"].astype(float) / 100.0,
+                "high": a["high"].astype(float) / 100.0,
+                "low": a["low"].astype(float) / 100.0,
+                "close": a["close"].astype(float) / 100.0,
+                "volume": a["volume"].astype(float),
+                "amount": a["amount"].astype(float),
+            }))
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=store.INDEX_SCHEMA)
+
+
+def sync_index_daily(zip_path: Path) -> pd.DataFrame:
+    """用包内指数日线覆盖 index_daily 的同代码历史(修复旧数据混入个股行情的问题)。"""
+    new = parse_index_zip(zip_path)
+    if new.empty:
+        return new
+    old = store.read_frame("index_daily.parquet")
+    if not old.empty:
+        old = old[~old["code"].isin(new["code"].unique())]
+    merged = pd.concat([old, new], ignore_index=True)
+    for col in store.INDEX_SCHEMA:
+        if col not in merged.columns:
+            merged[col] = None
+    store.upsert("index_daily.parquet", merged[store.INDEX_SCHEMA], ["code", "date"])
+    logger.info("指数日线(包内)同步: %d 行, %s 最新 %s",
+                len(new), ",".join(sorted(new["code"].unique())), new["date"].max())
+    return new
+
+
 def parse_zip(zip_path: Path, detail_cutoff: int | None = None,
               lo_num: int | None = None, hi_num: int | None = None,
               ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -692,6 +744,9 @@ def fetch_tdx(force: bool = False, mode: str = "auto", all_segments: bool = True
             logger.warning("package_not_updated: 包内最新交易日 %d < 应到交易日 %d, 不落库不覆盖快照",
                            latest, expected)
             raise PackageNotUpdatedError(f"package_not_updated: {latest} < {expected}")
+
+        # 指数日线(上证指数/沪深300)直接从包内同步, 权威口径且带成交量/成交额
+        sync_index_daily(zp)
 
         prev = store.read_status().get("tdx", {})
         has_products = (store.DATA_DIR / "tdx_breadth.parquet").exists() and \

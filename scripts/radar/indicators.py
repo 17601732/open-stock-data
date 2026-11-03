@@ -277,6 +277,9 @@ def build_indicators() -> pd.DataFrame:
         if limit:
             df[col] = df[col].ffill(limit=limit)
     df = df.reindex(trading)
+    # 综合分口径固定从 history_start 起算: 指数全历史(2005+)接入后若放任扩展,
+    # 会改变 2014-2019 的滚动分位基准, 让已发布的历史分数与信号无声漂移。
+    df = df.loc[df.index >= pd.Timestamp(RADAR_CONFIG["history_start"])]
     if not idx.empty and len(trading):
         # 只保留已完成交易日: 北京时间 15:30 前抓到当天的指数日线是盘中未完成值,
         # 若把它当成收盘数据会导致快照 cutoff 提前一天、指标失真(如 MA60 掉值)。

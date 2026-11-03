@@ -59,6 +59,17 @@ RADAR_CONFIG: dict = {
             {"label": "2024年初微盘股流动性危机(分布外)", "start": "2024-01-01", "end": "2024-06-30"},
         ],
     },
+    # 技术分析图层(独立展示 + 独立技术分, 不参与综合分; 仅用于 A/B/C 对照实验)
+    "tech": {
+        "fib": {
+            "threshold": 0.20,   # zigzag 波段阈值: 反转 >=20% 才确认高/低点
+            "ratios": [0.236, 0.382, 0.5, 0.618, 0.809],
+        },
+        "vol": {"heavy_mult": 2.0, "light_mult": 0.5},
+        "macd": {"fast": 12, "slow": 26, "signal": 9},
+        "divergence": {"lookback": 60, "gap": 20},
+        "score": {"blend_weight_tech": 0.2, "calibrate_min_days": 60},
+    },
     # 板块「放量长上影线」风险提醒(独立模块, 不参与综合分)
     "pattern": {
         "shadow_ratio": 0.5,        # 上影线 / 当日振幅 ≥ 0.5: 一半以上振幅落在上影线

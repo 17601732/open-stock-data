@@ -104,10 +104,53 @@ def _breadth_check(date: str) -> dict | None:
             "scope": "样本池(沪深300+中证500), 非全市场"}
 
 
+def _drivers(detail: pd.DataFrame, date: str, sig_type: str, limit: int = 5) -> list[dict]:
+    """信号当日贡献最大的前 limit 个指标。
+
+    贡献 = 权重 * (方向化分位 - 50) / 可用权重合计, 即该指标把综合分推离中性(50)的分数;
+    顶部取正向最大, 底部取负向最大(把分数往下拉最多的指标)。
+    """
+    weights = RADAR_CONFIG["composite"]["weights"]
+    d = detail[pd.to_datetime(detail["date"]) == pd.Timestamp(date)].copy()
+    d = d[d["key"].isin(weights.keys())].dropna(subset=["pct", "oriented"])
+    if d.empty:
+        return []
+    total_w = float(d["weight"].sum())
+    if total_w <= 0:
+        return []
+    d["contrib"] = d["weight"] * (d["oriented"] - 50.0) / total_w
+    abs_sum = float(d["contrib"].abs().sum())
+    d = d.sort_values("contrib", ascending=(sig_type == "bottom"))
+    out = []
+    for _, r in d.head(limit).iterrows():
+        meta = weights[r["key"]]
+        out.append({
+            "key": r["key"], "name": meta["name"], "group": meta["group"],
+            "weight": round(float(meta["weight"]), 3),
+            "percentile": round(float(r["pct"]), 1),
+            "oriented": round(float(r["oriented"]), 1),
+            "contrib": round(float(r["contrib"]), 1),
+            "share": round(abs(float(r["contrib"])) / abs_sum * 100, 1) if abs_sum else None,
+        })
+    return out
+
+
+def _signal_extras(detail: pd.DataFrame, date: str, sig_type: str,
+                   confirmed_dates: dict[str, str]) -> dict:
+    """信号的可解释字段: 贡献前 5 指标 + 是否确认信号。"""
+    return {
+        "drivers": _drivers(detail, date, sig_type),
+        "confirmed": date in confirmed_dates,
+        "confirmed_date": confirmed_dates.get(date),
+    }
+
+
 def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFrame,
                    backtest_result: dict, indicator_frame: pd.DataFrame,
                    include_history: bool = True,
-                   anomalies: list[dict] | None = None) -> dict:
+                   anomalies: list[dict] | None = None,
+                   tech: dict | None = None,
+                   abtest: dict | None = None) -> dict:
     """组装快照字典。"""
     weights = RADAR_CONFIG["composite"]["weights"]
     status = store.read_status()
@@ -183,7 +226,33 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
         sig["score"] = sig["score"].round(1)
 
     cf = confirm_signals(comp)
-    signals_confirmed = cf.to_dict("records") if len(cf) else []
+    signals_confirmed = []
+    confirmed_dates: dict[str, str] = {}
+    if len(cf):
+        for _, r in cf.iterrows():
+            item = {k: (None if (isinstance(v, float) and pd.isna(v)) else v) for k, v in r.items()}
+            item["drivers"] = _drivers(detail, item["date"], item["type"])
+            signals_confirmed.append(item)
+            confirmed_dates[str(item["date"])] = str(item["confirmed_date"])
+
+    # 每条信号补齐: 贡献前 5 指标 + 是否确认信号
+    if len(sig):
+        extras = [_signal_extras(detail, d, t, confirmed_dates)
+                  for d, t in zip(sig["date"], sig["type"], strict=False)]
+        sig = pd.concat([sig.reset_index(drop=True), pd.DataFrame(extras)], axis=1)
+
+    # 回测事件补齐同样的可解释字段与命中标记(顶部 ret<0 命中, 底部 ret>0 命中)
+    events = (backtest_result or {}).get("events") or []
+    for e in events:
+        d = str(e.get("date"))
+        e.update(_signal_extras(detail, d, e.get("type", ""), confirmed_dates))
+        for h in RADAR_CONFIG["backtest"]["forward_days"]:
+            ret = e.get(f"ret{h}")
+            if ret is None or pd.isna(ret):
+                e[f"hit{h}"] = None
+            else:
+                e[f"hit{h}"] = bool(ret < 0) if e.get("type") == "top" else bool(ret > 0)
+        e["hit"] = e.get("hit20")
 
     ta = score_diagnostics(comp).copy()
     ta["date"] = pd.to_datetime(ta["date"]).dt.strftime("%Y-%m-%d")
@@ -264,7 +333,7 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
             "ex_rights": status.get("ex_rights"),
             "ex_rights_flags": status.get("ex_rights_flags"),
             "snapshot_url": SNAPSHOT_URL,
-            "schema_version": 2,
+            "schema_version": 3,
         },
         "latest": {
             "date": latest_date,
@@ -287,6 +356,8 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
         "score_ta": score_ta,
         "signals_confirmed": signals_confirmed,
         "pattern": pattern,
+        "tech": tech or {"available": False},
+        "tech_abtest": abtest or {"available": False},
     }
     return snapshot
 

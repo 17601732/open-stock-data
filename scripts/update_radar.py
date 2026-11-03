@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from scripts.radar import backtest, build_snapshot, fetch_inputs, indicators, store
+from scripts.radar import backtest, build_snapshot, fetch_inputs, fetch_tdx, indicators, store, tech
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("radar")
@@ -33,7 +33,13 @@ def run(full: bool = False, skip_stocks: bool = False, with_holders: bool = Fals
             full = True
             logger.warning("本地原始数据不足(指数 %d 行), 自动切换为全量模式", len(idx_existing))
     logger.info("1/4 抓取输入数据")
-    fetch_inputs.fetch_all(full=full, with_holders=with_holders, skip_stocks=skip_stocks)
+    try:
+        fetch_inputs.fetch_all(full=full, with_holders=with_holders, skip_stocks=skip_stocks)
+    except fetch_tdx.PackageNotUpdatedError as exc:
+        # 通达信包发布晚于 cron: 包内还没到应到交易日时直接跳过, 不覆盖已有快照, 退出码 0
+        logger.warning("package_not_updated: %s", exc)
+        logger.warning("package_not_updated: 本次不落库、不覆盖快照, 等下一次 cron")
+        return {"skipped": True, "reason": "package_not_updated"}
 
     logger.info("2/4 计算指标与综合分")
     ind = indicators.build_indicators()
@@ -56,7 +62,7 @@ def run(full: bool = False, skip_stocks: bool = False, with_holders: bool = Fals
                 int((signals.type == "top").sum()) if len(signals) else 0,
                 int((signals.type == "bottom").sum()) if len(signals) else 0)
 
-    logger.info("3/4 事件研究回测")
+    logger.info("3/4 事件研究回测 + 技术图层")
     idx = store.read_frame("index_daily.parquet")
     bench = idx[idx.code == benchmark_code()].copy()
     bench["date"] = pd.to_datetime(bench["date"])
@@ -65,8 +71,13 @@ def run(full: bool = False, skip_stocks: bool = False, with_holders: bool = Fals
     px = px.loc[:comp["date"].max()]
     bt = backtest.run_event_study(signals, px, detail)
 
+    tech_payload, tech_full = tech.build_tech(idx)
+    abtest = tech.ab_test(comp, tech_full, px, detail)
+    logger.info("技术分对照: %s", abtest.get("verdict"))
+
     logger.info("4/4 导出快照")
-    snap = build_snapshot.build_snapshot(comp, detail, signals, bt, ind, anomalies=anomaly_flags)
+    snap = build_snapshot.build_snapshot(comp, detail, signals, bt, ind, anomalies=anomaly_flags,
+                                         tech=tech_payload, abtest=abtest)
     path = build_snapshot.write_snapshot(snap, android_assets)
     logger.info("快照 %s (%.0f KB), 耗时 %.0fs", path, path.stat().st_size / 1024, time.time() - t0)
     return snap
