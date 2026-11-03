@@ -53,7 +53,7 @@ TDX_HEADERS = {
 }
 MIN_ZIP_BYTES = 450 * 1024 * 1024
 DETAIL_YEARS = 3           # 个股明细保留近 3 年(形态回测需要足够的跨期样本)
-PARSE_VERSION = 4          # 解析口径版本: 证券类型白名单/volume 过滤/市场前缀主键变更时递增
+PARSE_VERSION = 5          # 解析口径版本: 证券类型白名单/volume 过滤/市场前缀主键变更时递增
 
 DAY_DTYPE = np.dtype([
     ("date", "<i4"), ("open", "<i4"), ("high", "<i4"), ("low", "<i4"),
@@ -158,12 +158,16 @@ def _stock_class(market: str, code: str) -> str | None:
     return None
 
 
-def _parse_members(zip_path: Path) -> list[tuple[str, str, str, str]]:
-    """列出包内 A 股 .day 文件: (market, stem, code, board), stem 形如 sh600000。"""
+def _parse_members(zip_path: Path) -> list[tuple[str, str, str, str, str]]:
+    """列出包内 A 股 .day 文件: (market, stem, code, board, zip_name)。
+
+    不同 CDN 返回的包内路径分隔符可能是 `/` 也可能是 `\\`, 统一归一化后再判断;
+    zip_name 保留原样, 解压时直接按它读取。
+    """
     with zipfile.ZipFile(zip_path) as zf:
         out = []
         for name in zf.namelist():
-            parts = name.split("/")
+            parts = name.replace("\\", "/").split("/")
             if len(parts) != 3 or parts[1] != "lday" or not name.endswith(".day"):
                 continue
             market, stem = parts[0], parts[2].split(".")[0]
@@ -175,7 +179,7 @@ def _parse_members(zip_path: Path) -> list[tuple[str, str, str, str]]:
             board = _stock_class(market, code)
             if board is None:
                 continue
-            out.append((market, stem, code, board))
+            out.append((market, stem, code, board, name))
         return out
 
 
@@ -202,8 +206,8 @@ def parse_zip(zip_path: Path, detail_cutoff: int | None = None) -> tuple[pd.Data
     members = _parse_members(zip_path)
     step = max(len(members) // 40, 1)
     latest = 0
-    for market, stem, _code, _board in members[::step]:
-        a = _read_day(zf, f"{market}/lday/{stem}.day")
+    for _market, _stem, _code, _board, entry in members[::step]:
+        a = _read_day(zf, entry)
         if len(a):
             latest = max(latest, int(a["date"][-1]))
     latest = latest or int(datetime.now().strftime("%Y%m%d"))
@@ -217,8 +221,8 @@ def parse_zip(zip_path: Path, detail_cutoff: int | None = None) -> tuple[pd.Data
     acc_bse: dict[int, list[float]] = {}
     detail_parts: list[pd.DataFrame] = []
     t0 = time.time()
-    for i, (market, stem, code, board) in enumerate(members, 1):
-        a = _read_day(zf, f"{market}/lday/{stem}.day")
+    for i, (market, _stem, code, board, entry) in enumerate(members, 1):
+        a = _read_day(zf, entry)
         if len(a) < 2:
             continue
         # 记录内 date 若未排序, 按 date 排序保证 prev_close 正确
