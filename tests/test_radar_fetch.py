@@ -1,8 +1,20 @@
 """抓取层纯函数测试(不联网)。"""
 
+from datetime import datetime
+
 import pandas as pd
 
 from scripts.radar.fetch_inputs import _pcr_to_long
+
+
+def test_expected_latest_num_uses_beijing_close():
+    """应到交易日按北京时间 15:30 判定: 盘后算当日, 盘前算上一工作日(UTC runner 曾误判)。"""
+    from scripts.radar.fetch_tdx import _expected_latest_num
+
+    assert _expected_latest_num(datetime(2026, 11, 3, 15, 40)) == 20261103
+    assert _expected_latest_num(datetime(2026, 11, 3, 9, 0)) == 20261102
+    assert _expected_latest_num(datetime(2026, 11, 1, 16, 0)) == 20261030
+    assert _expected_latest_num(datetime(2026, 10, 31, 10, 0)) == 20261030
 
 
 def test_pcr_wide_to_long_keeps_all_rows():
