@@ -29,6 +29,7 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: write
+      actions: write # 末尾用 gh workflow run 分发 TRIN / PCR
 
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +54,7 @@ jobs:
       - name: Update TRIN (Sina snapshot)
         id: trin
         continue-on-error: true
+        timeout-minutes: 20 # 新浪快照偶发挂起, 超时失败后由末尾的独立 TRIN run 兜底
         run: uv run python scripts/calc_trin_30d.py
 
       # 通达信全量包 hsjday.zip(约 526MB)在 data/radar/tdx 下, 随上面的缓存一起恢复;
@@ -122,6 +124,21 @@ jobs:
             git pull --rebase origin main || true
             git push
           fi
+
+      # 一次触发带齐 TRIN 与 PCR: 显式分发两个独立 workflow, Actions 页面能看到 3 个 run。
+      # 用 dispatch 而非 workflow_call, 因为 workflow_call 只会变成同一个 run 里的 job, 不满足
+      # 「三个 run 各自可见/可重跑」的要求; 失败也只需单独重跑那一个。
+      - name: Dispatch TRIN and PCR workflows
+        if: always() # 快照/校验失败也要补跑 TRIN 与 PCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run trin_30d.yml --ref "${{ github.ref_name }}"
+          gh workflow run update_option_pcr.yml --ref "${{ github.ref_name }}"
+          sleep 5
+          echo "已分发, 最近一次 run:"
+          gh run list --workflow trin_30d.yml --limit 1 --json databaseId,status,conclusion,url
+          gh run list --workflow update_option_pcr.yml --limit 1 --json databaseId,status,conclusion,url
 
       # 快照已提交后再显式失败, 保证"数据照常更新 + 失败可被邮件通知"
       - name: Notify TRIN failure

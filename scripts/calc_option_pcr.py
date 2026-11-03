@@ -20,9 +20,8 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     """生成 50ETF PCR CSV(保留原列名), 与合并版数据同源。"""
     df = fetch_option_pcr()
-    if df.empty:
-        logger.warning("无期权数据, 跳过写出")
-        return
+    if df.empty or "pcr_510050" not in df.columns or df["pcr_510050"].notna().sum() == 0:
+        raise SystemExit("PCR 无有效数据(空表或无 pcr 列), 判为失败")
     out = pd.DataFrame({
         "date": df["date"],
         "pcr_vol": df["pcr_510050"].round(4),

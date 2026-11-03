@@ -529,6 +529,11 @@ def fetch_valuation() -> pd.DataFrame:
 def _fetch_pcr_one(date: str) -> list[dict]:
     """抓取单日期权统计, 返回 510050/510300 的认购认沽成交量。"""
     d = ak.option_daily_stats_sse(date=date.replace("-", ""))
+    # 当日统计未发布/接口字段变动时返回空表或换了列名, 显式报错而不是抛 KeyError
+    if d is None or d.empty:
+        raise RuntimeError(f"{date} 期权统计未发布(空表)")
+    if "合约标的代码" not in d.columns:
+        raise RuntimeError(f"{date} 期权统计字段变动: columns={list(d.columns)[:8]}")
     out = []
     for target_code in ("510050", "510300"):
         row = d[d["合约标的代码"].astype(str) == target_code]
@@ -614,9 +619,11 @@ def fetch_option_pcr(full: bool = False, workers: int = 4) -> pd.DataFrame:
             logger.warning("修复历史 PCR 落盘断档: 恢复 %d 个日期", raw_na - fixed_na)
     idx = store.read_frame("index_daily.parquet")
     if idx.empty:
-        logger.error("缺少指数日线, 无法确定交易日; 请先抓指数")
-        return existing
-    dates = sorted(idx[idx.code == "000300"].date.unique())
+        # PCR 独立 workflow 没有指数缓存时, 用最近 10 个工作日兜底, 不能整源放弃
+        logger.warning("缺少指数日线, 回退最近 10 个工作日作为候选交易日")
+        dates = [str(t.date()) for t in pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=10)]
+    else:
+        dates = sorted(idx[idx.code == "000300"].date.unique())
     start = PCR_START
     done = set(existing.date.unique()) if not existing.empty else set()
     todo = [d for d in dates if d >= start and d not in done]
@@ -652,6 +659,11 @@ def fetch_option_pcr(full: bool = False, workers: int = 4) -> pd.DataFrame:
                             coverage_days=len(wide), note="仅保留实际可得区间, 无前向填充")
         logger.info("PCR %d 行, %s ~ %s", len(wide), wide.date.min(), wide.date.max())
         return wide
+    if todo:
+        # 有交易日要抓却一条没抓到: 如实失败, 不能拿存量数据冒充成功
+        store.update_status("option_pcr", status="failed",
+                            reason=f"{len(todo)} 个交易日未抓到数据", unavailable_days=sorted(todo)[-10:])
+        raise RuntimeError(f"PCR 抓取全部失败: {len(todo)} 个交易日无数据, 最近 {sorted(todo)[-3:]}")
     if not existing.empty:
         # 部分日期接口尚未发布统计(如盘中/非交易日), 保留存量数据, 不把整源判为失败
         store.update_status("option_pcr", status="ok", start=str(existing.date.min()),

@@ -3,11 +3,13 @@ name: Update Option PCR Data
 on:
   workflow_dispatch: # 允许在网页上手动点击运行
   schedule:
-    - cron: '30 8 * * 1-5' # 每天北京时间 16:30 自动运行 (UTC+8)
+    # 北京时间 21:00 (UTC 13:00): 上交所当日期权统计通常在盘后发布, 16:30 太早会拿到空表
+    - cron: '0 13 * * 1-5'
 
 jobs:
   update-data:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write # 必须要有这个权限，才能 git push 回仓库
 
@@ -15,24 +17,46 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: '3.10'
+          enable-cache: true
 
-      - name: Install Dependencies
+      # 只读复用雷达的原始缓存(index_daily.parquet 提供交易日历); 不回写, 避免污染雷达缓存
+      - name: Restore radar raw cache (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/radar
+          key: radar-raw-${{ github.run_id }}
+          restore-keys: |
+            radar-raw-
+
+      - name: Install dependencies
+        run: uv sync
+
+      # 必须以模块方式运行: 直接执行 scripts/calc_option_pcr.py 时 sys.path 是 scripts/,
+      # 会报 ModuleNotFoundError: No module named 'scripts'
+      - name: Run PCR script
+        run: uv run python -m scripts.calc_option_pcr
+
+      - name: Verify PCR output
         run: |
-          python -m pip install --upgrade pip
-          pip install akshare pandas
-
-      - name: Run Script
-        # 直接运行 AKShare 脚本，因为它很稳定
-        run: python scripts/calc_option_pcr.py
+          test -s data/radar/option_pcr_etf.csv
+          test -s option_pcr_50etf.csv
+          uv run python - <<'PY'
+          import pandas as pd
+          d = pd.read_csv('data/radar/option_pcr_etf.csv')
+          o = pd.read_csv('option_pcr_50etf.csv')
+          assert len(d) > 100, f"PCR 空表: {len(d)}"
+          assert d['pcr'].notna().sum() > 100, "PCR 指标全为空"
+          assert o['pcr_vol'].notna().sum() > 100, "50ETF PCR 指标全为空"
+          print('pcr rows', len(d), d['date'].min(), '~', d['date'].max(),
+                'latest pcr', round(float(d['pcr'].dropna().iloc[-1]), 4))
+          PY
 
       - name: Commit and Push
         run: |
           git config --global user.name 'GitHub Action'
           git config --global user.email 'action@github.com'
-          git add option_pcr_50etf.csv
-          # 下面这行代码的意思是：如果有文件变化才提交，没变化就跳过，防止报错
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update option PCR data" && git push)
+          git add option_pcr_50etf.csv data/radar/option_pcr_etf.csv
+          # 有变化才提交，没变化跳过，避免空提交报错
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update option PCR data" && git pull --rebase origin main && git push)

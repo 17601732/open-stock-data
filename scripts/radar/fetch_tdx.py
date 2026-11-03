@@ -19,13 +19,23 @@
     data/radar/tdx_stock.parquet    近 DETAIL_DAYS 个交易日全市场个股 OHLCV(供形态计算)
   原始 zip 只进 Actions 缓存, 不入库、不提交。
 
+分阶段与增量:
+- 已有 breadth/stock 产物时, 只解析最后一个已落盘交易日之后的缺口(默认行为)。
+- 产物缺失/口径版本不一致时, 按「年」切片逐段解析(新→旧), 每段落盘到
+  data/radar/tdx/parts, 由 manifest.json 记录已完成年份, 支持断点续跑;
+  中断后下次只补未完成的年份, 失败只需重跑该段。
+
 CLI:
-    python -m scripts.radar.fetch_tdx            # 增量(缓存 24h 内直接复用)
-    python -m scripts.radar.fetch_tdx --force    # 强制重新下载
+    python -m scripts.radar.fetch_tdx              # 自动: 有产物走增量, 否则按年补历史
+    python -m scripts.radar.fetch_tdx --force      # 强制重新下载全量包(仍按增量/分段解析)
+    python -m scripts.radar.fetch_tdx --incremental  # 只解析缺口, 不补历史
+    python -m scripts.radar.fetch_tdx --one-segment  # 只补一个缺失年份(调试/超长历史分批)
+    python -m scripts.radar.fetch_tdx --from-year 2024 --to-year 2024  # 只跑指定年份段
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import zipfile
@@ -63,6 +73,9 @@ RECORD_BYTES = DAY_DTYPE.itemsize  # 32
 
 CACHE_DIR = store.DATA_DIR / "tdx"
 CACHE_ZIP = CACHE_DIR / "hsjday.zip"
+# 分阶段解析的落盘目录: 只进 Actions 缓存, 不提交(个股明细约 82MB, 超过仓库舒适体积)
+PART_DIR = CACHE_DIR / "parts"
+PART_MANIFEST = PART_DIR / "manifest.json"
 
 
 def _history_start_num() -> int:
@@ -192,14 +205,21 @@ def _read_day(zf: zipfile.ZipFile, name: str) -> np.ndarray:
     return np.frombuffer(raw[: n * RECORD_BYTES], dtype=DAY_DTYPE)
 
 
-def parse_zip(zip_path: Path, detail_cutoff: int | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def parse_zip(zip_path: Path, detail_cutoff: int | None = None,
+              lo_num: int | None = None, hi_num: int | None = None,
+              ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """解析全量包, 返回 (breadth, stock_detail, bse_breadth)。
 
     breadth 只统计沪深 A 股(2014 起): 上涨/下跌/平盘家数, 上涨量/下跌量, 成交额合计。
     北交所单列返回, 不并入沪深口径(北交所 2021 年才开市, 混入会造成历史序列断层)。
     stock_detail 只保留沪深 A 股最近 DETAIL_YEARS 年, 主键为 market+code(symbol)。
+
+    lo_num/hi_num 限定只聚合 [lo_num, hi_num] 区间的交易日(增量/分段解析用);
+    涨跌幅仍用区间前一条记录算 prev_close, 保证缺口首日不会退化为 0/0/0。
     """
     start = _history_start_num()
+    lo = max(start, int(lo_num or 0))
+    hi = int(hi_num or 99999999)
     # 抽样 40 个文件取最新交易日, 据此确定明细截断点(全量扫描会多花一倍解压时间)
     t_scan = time.time()
     zf = zipfile.ZipFile(zip_path)
@@ -213,8 +233,8 @@ def parse_zip(zip_path: Path, detail_cutoff: int | None = None) -> tuple[pd.Data
     latest = latest or int(datetime.now().strftime("%Y%m%d"))
     cutoff = detail_cutoff or int(
         (pd.Timestamp(str(latest)) - pd.DateOffset(years=DETAIL_YEARS)).strftime("%Y%m%d"))
-    logger.info("TDX 包内 A 股文件 %d 个, 最新交易日 %d, 明细截断 %d (扫描 %.0fs)",
-                len(members), latest, cutoff, time.time() - t_scan)
+    logger.info("TDX 包内 A 股文件 %d 个, 最新交易日 %d, 明细截断 %d, 解析区间 %d~%d (扫描 %.0fs)",
+                len(members), latest, cutoff, lo, hi, time.time() - t_scan)
 
     # 逐日聚合容器: date -> [up, down, flat, up_vol, down_vol, amount, up_amt, down_amt]
     acc: dict[int, list[float]] = {}
@@ -237,12 +257,12 @@ def parse_zip(zip_path: Path, detail_cutoff: int | None = None) -> tuple[pd.Data
         close = a["close"].astype(np.float64) / 100.0
         prev = np.concatenate([[np.nan], close[:-1]])
         chg = close / prev - 1.0
-        # 先算涨跌幅再截断: 首个保留日(2014-01-02)需要前一交易日收盘价,
+        # 先算涨跌幅再截断: 缺口/分段的首个保留日需要前一条记录收盘价,
         # 否则其 prev_close 恒为 NaN, 那天会退化成 0/0/0
-        keep_start = a["date"] >= start
-        if keep_start.sum() < 2:
+        keep = (a["date"] >= lo) & (a["date"] <= hi)
+        if not keep.any():
             continue
-        a, close, prev, chg = a[keep_start], close[keep_start], prev[keep_start], chg[keep_start]
+        a, close, prev, chg = a[keep], close[keep], prev[keep], chg[keep]
         vol = a["volume"].astype(np.float64)
         amt = a["amount"].astype(np.float64)
         up = (chg > 0.0005) & np.isfinite(chg)
@@ -270,8 +290,9 @@ def parse_zip(zip_path: Path, detail_cutoff: int | None = None) -> tuple[pd.Data
 
         if board == "bse":
             continue
-        keep = dates >= cutoff
-        if keep.sum() >= 2:
+        detail_lo = max(cutoff, lo)
+        keep = (dates >= detail_lo) & (dates <= hi)
+        if keep.any():
             detail_parts.append(pd.DataFrame({
                 "symbol": f"{market}{code}",
                 "market": market,
@@ -382,11 +403,197 @@ def detect_ex_rights(stock: pd.DataFrame, market_breadth: pd.DataFrame | None = 
     return (chg <= thresh) & (amp <= 0.15)
 
 
-def fetch_tdx(force: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """下载并解析全量包, 落盘 breadth/个股明细/北交所序列, 更新状态。"""
+# ---------------------------------------------------------------- 分段落盘
+def _read_manifest() -> dict:
+    """读取分段 manifest; 损坏时按空处理(重新补历史, 不影响增量)。"""
+    if PART_MANIFEST.exists():
+        try:
+            return json.loads(PART_MANIFEST.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("分段 manifest 损坏, 重新开始补历史")
+    return {"segments": {}}
+
+
+def _write_manifest(manifest: dict) -> None:
+    PART_DIR.mkdir(parents=True, exist_ok=True)
+    PART_MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _year_range(year: int) -> tuple[int, int]:
+    return int(f"{year}0101"), int(f"{year}1231")
+
+
+def _part_path(kind: str, year: int) -> Path:
+    return PART_DIR / f"{kind}_{year}.parquet"
+
+
+def _write_segment(year: int, breadth: pd.DataFrame, bse: pd.DataFrame,
+                   stock: pd.DataFrame) -> None:
+    """把单个年份段的解析结果落盘, 并登记到 manifest(断点续跑依据)。"""
+    PART_DIR.mkdir(parents=True, exist_ok=True)
+    for kind, df in (("breadth", breadth), ("bse", bse), ("stock", stock)):
+        if not df.empty:
+            df.to_parquet(_part_path(kind, year), index=False)
+    manifest = _read_manifest()
+    manifest["segments"][str(year)] = {
+        "breadth_rows": len(breadth), "bse_rows": len(bse), "stock_rows": len(stock),
+        "done_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    _write_manifest(manifest)
+    logger.info("分段 %d 已落盘: breadth %d 行, 北交所 %d 行, 个股明细 %d 行",
+                year, len(breadth), len(bse), len(stock))
+
+
+def _load_parts() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """合并所有已完成年份段; 返回 (breadth, bse, stock)。"""
+    manifest = _read_manifest()
+    years = sorted(int(y) for y in manifest.get("segments", {}) if y.isdigit())
+    frames: dict[str, list[pd.DataFrame]] = {"breadth": [], "bse": [], "stock": []}
+    for y in years:
+        for kind in frames:
+            p = _part_path(kind, y)
+            if p.exists():
+                frames[kind].append(pd.read_parquet(p))
+    out = []
+    for kind in ("breadth", "bse", "stock"):
+        if not frames[kind]:
+            out.append(pd.DataFrame())
+            continue
+        df = pd.concat(frames[kind], ignore_index=True)
+        keys = ["date"] if kind != "stock" else ["symbol", "date"]
+        df = df.drop_duplicates(subset=keys, keep="last").sort_values(keys[0])
+        out.append(df.reset_index(drop=True))
+    return out[0], out[1], out[2]
+
+
+# ---------------------------------------------------------------- 主流程
+def _commit_products(breadth: pd.DataFrame, stock: pd.DataFrame, bse: pd.DataFrame,
+                     *, mode: str, t0: float, zp: Path, gap_days: int = 0) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """校验并落盘最终产物(下游只读这三个 parquet), 更新状态。"""
+    if breadth.empty:
+        raise ValueError("解析后 breadth 为空")
+    checks = validate_breadth(breadth, stock, bse)
+    if not checks["sum_matches_total"]:
+        raise ValueError(f"宽度自洽校验失败: {checks['latest']}")
+    from scripts.radar import exrights
+
+    if not stock.empty:
+        stock = exrights.apply_flags(stock, breadth)
+    store.write_frame("tdx_breadth.parquet", breadth)
+    if not stock.empty:
+        store.write_frame("tdx_stock.parquet", stock)
+    else:
+        logger.warning("本次解析无个股明细(分段早于明细年限), 保留已有 tdx_stock.parquet")
+    if not bse.empty:
+        store.write_frame("tdx_bse_breadth.parquet", bse)
+    else:
+        logger.warning("本次解析无北交所数据, 保留已有 tdx_bse_breadth.parquet")
+    store.update_status(
+        "tdx", status="ok", path="hsjday.zip", zip_mb=round(zp.stat().st_size / 1048576, 1),
+        mode=mode, parse_version=PARSE_VERSION,
+        breadth_days=len(breadth), stock_rows=len(stock),
+        stock_codes=int(stock["symbol"].nunique()) if not stock.empty else 0,
+        start=str(breadth.date.min()), end=str(breadth.date.max()),
+        ex_rights_rows=int(stock["ex_rights"].sum()) if "ex_rights" in stock else 0,
+        elapsed_sec=round(time.time() - t0, 1), gap_days=gap_days,
+        checks=checks, scope="沪深A股(不含北交所)",
+        note=".day 为不复权; ex_rights 来自东财分红送配除权除息日(缺失时回退启发式), 跨期收益已排除跨除权样本",
+    )
+    logger.info("TDX 完成 %.0fs(mode=%s, 缺口 %d 日): 沪深A股 %s~%s 最新 %s, 个股 %d 只/%d 行",
+                time.time() - t0, mode, gap_days, breadth.date.min(), breadth.date.max(),
+                checks["latest"]["total"], stock["symbol"].nunique() if not stock.empty else 0,
+                len(stock))
+    return breadth, stock
+
+
+def _incremental(zp: Path, t0: float) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    """只解析最后一个已落盘交易日之后的数据; 无缺口返回 None(调用方走分段)。"""
+    old_breadth = store.read_frame("tdx_breadth.parquet")
+    if old_breadth.empty:
+        return None
+    last = str(old_breadth["date"].max())
+    lo = int(last.replace("-", "")) + 1
+    ts = time.time()
+    new_breadth, new_stock, new_bse = parse_zip(zp, lo_num=lo)
+    logger.info("增量解析 %.0fs(起点 %s): breadth +%d 日, 个股 +%d 行",
+                time.time() - ts, last, len(new_breadth), len(new_stock))
+    if new_breadth.empty:
+        logger.info("TDX 无新增交易日(最后已落盘 %s), 跳过重解析", last)
+        store.update_status("tdx", status="ok", mode="incremental", parse_version=PARSE_VERSION,
+                            start=str(old_breadth.date.min()), end=last,
+                            breadth_days=len(old_breadth), gap_days=0,
+                            note="无新增交易日; 复用已落盘产物")
+        return store.read_frame("tdx_breadth.parquet"), store.read_frame("tdx_stock.parquet")
+
+    old_stock = store.read_frame("tdx_stock.parquet")
+    old_bse = store.read_frame("tdx_bse_breadth.parquet")
+
+    def _merge(old: pd.DataFrame, new: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+        if old.empty:
+            return new
+        merged = pd.concat([old, new], ignore_index=True)
+        merged = merged.drop_duplicates(subset=keys, keep="last")
+        sort_col = "date" if "date" in merged.columns else keys[0]
+        return merged.sort_values(sort_col).reset_index(drop=True)
+
+    breadth = _merge(old_breadth, new_breadth, ["date"])
+    stock = _merge(old_stock, new_stock, ["symbol", "date"])
+    bse = _merge(old_bse, new_bse, ["date"])
+    return _commit_products(breadth, stock, bse, mode="incremental", t0=t0, zp=zp,
+                            gap_days=len(new_breadth))
+
+
+def _staged(zp: Path, t0: float, *, all_segments: bool, from_year: int | None,
+            to_year: int | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """按年分段补历史: 新→旧逐段落盘, manifest 记录进度, 支持断点续跑。"""
+    start_year = int(_history_start_num() // 10000)
+    this_year = datetime.now().year
+    lo_y = from_year or start_year
+    hi_y = to_year or this_year
+    manifest = _read_manifest()
+    done = {int(y) for y in manifest.get("segments", {}) if str(y).isdigit()}
+    todo = [y for y in range(hi_y, lo_y - 1, -1) if y not in done]
+    if not todo:
+        logger.info("分段历史已补齐(%d~%d), 改走增量", lo_y, hi_y)
+        return _incremental(zp, t0) or (_load_parts()[0], _load_parts()[2])
+    if not all_segments:
+        todo = todo[:1]
+    logger.info("待补分段 %s(共 %d 段, 逐段落盘, 可断点续跑)", todo, len(todo))
+    for year in todo:
+        lo_num, hi_num = _year_range(year)
+        ts = time.time()
+        breadth, stock, bse = parse_zip(zp, lo_num=lo_num, hi_num=hi_num)
+        if breadth.empty:
+            raise ValueError(f"分段 {year} 解析后 breadth 为空")
+        _write_segment(year, breadth, bse, stock)
+        logger.info("分段 %d 完成 %.0fs", year, time.time() - ts)
+    breadth, bse, stock = _load_parts()
+    if breadth.empty:
+        # 分段全部落在当前年份之前(个股明细为空)时, 仍以最近可用段为准
+        raise ValueError("所有分段合并后 breadth 为空")
+    return _commit_products(breadth, stock, bse, mode="staged", t0=t0, zp=zp,
+                            gap_days=0)
+
+
+def _staged_in_progress() -> bool:
+    """是否处于「分段补历史」中途: 有 manifest 且仍有缺失年份。"""
+    manifest = _read_manifest()
+    done = {int(y) for y in manifest.get("segments", {}) if str(y).isdigit()}
+    if not done:
+        return False
+    start_year = int(_history_start_num() // 10000)
+    expected = set(range(start_year, datetime.now().year + 1))
+    return done != expected
+
+
+def fetch_tdx(force: bool = False, mode: str = "auto", all_segments: bool = True,
+              from_year: int | None = None, to_year: int | None = None,
+              ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """下载并解析全量包, 落盘 breadth/个股明细/北交所序列, 更新状态。
+
+    mode: auto(有产物走增量, 否则补分段) / incremental(只补缺口) / full(一次全量) / staged(补分段)
+    """
     t0 = time.time()
-    out_breadth = store.DATA_DIR / "tdx_breadth.parquet"
-    out_stock = store.DATA_DIR / "tdx_stock.parquet"
     try:
         zp = ensure_zip(force)
         # 缓存包可能来自被截断/被反爬页替换的旧下载: 先扫成员, 0 个则丢弃重下
@@ -401,73 +608,38 @@ def fetch_tdx(force: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
                     sample = zf.namelist()[:5]
                 raise ValueError(f"包内无可识别 A 股 .day (%.1f MB), namelist 样例={sample}"
                                  % (zp.stat().st_size / 1048576))
+
         prev = store.read_status().get("tdx", {})
-        # 解析产物比 zip 新 + 口径版本一致 → 复用; 否则重解析(防旧缓存污染)
-        cached = (
-            not force and out_breadth.exists() and out_stock.exists()
-            and out_breadth.stat().st_mtime >= zp.stat().st_mtime
-            and out_stock.stat().st_mtime >= zp.stat().st_mtime
-        )
-        if cached:
+        has_products = (store.DATA_DIR / "tdx_breadth.parquet").exists() and \
+                       (store.DATA_DIR / "tdx_stock.parquet").exists()
+        version_ok = prev.get("parse_version") == PARSE_VERSION
+
+        if from_year is not None or to_year is not None:
+            return _staged(zp, t0, all_segments=all_segments, from_year=from_year, to_year=to_year)
+        if mode == "full":
+            breadth, stock, bse = parse_zip(zp)
+            return _commit_products(breadth, stock, bse, mode="full", t0=t0, zp=zp)
+        if mode == "auto" and has_products and version_ok and _staged_in_progress():
+            # 上一轮分段补历史中途退出: 先补完缺失年份, 再补当天缺口
+            logger.info("检测到分段补历史未完成, 继续补缺失年份")
+            _staged(zp, t0, all_segments=all_segments, from_year=None, to_year=None)
+            got = _incremental(zp, t0)
+            if got is not None:
+                return got
+            return store.read_frame("tdx_breadth.parquet"), store.read_frame("tdx_stock.parquet")
+        if mode in ("auto", "incremental") and has_products and version_ok:
+            got = _incremental(zp, t0)
+            if got is not None:
+                return got
+        if mode == "incremental":
+            logger.warning("已落盘产物的口径版本为 %s(需 %s), 增量模式不重解析, 沿用现有产物",
+                           prev.get("parse_version"), PARSE_VERSION)
             breadth = store.read_frame("tdx_breadth.parquet")
-            stock = store.read_frame("tdx_stock.parquet")
-            bse = store.read_frame("tdx_bse_breadth.parquet")
-            checks = validate_breadth(breadth, stock, bse)
-            if prev.get("parse_version") == PARSE_VERSION and checks["ok"] \
-                    and "symbol" in stock.columns:
-                # 除权日历更新过(或之前是启发式打的标)时, 重新打标
-                flags = store.read_status().get("ex_rights_flags", {})
-                cal = store.read_frame("ex_rights.parquet")
-                if not cal.empty and flags.get("flag_source") != "eastmoney_fhps":
-                    from scripts.radar import exrights
-
-                    stock = exrights.apply_flags(stock, breadth)
-                    store.write_frame("tdx_stock.parquet", stock)
-                    logger.info("已用东财除权日历重新打标: %d 行", int(stock["ex_rights"].sum()))
-                logger.info("复用已解析 TDX 产物 (%d 日 / %d 行)", len(breadth), len(stock))
-                store.update_status(
-                    "tdx", status="ok", path="hsjday.zip",
-                    zip_mb=round(zp.stat().st_size / 1048576, 1),
-                    mode="cached", parse_version=PARSE_VERSION,
-                    breadth_days=len(breadth), stock_rows=len(stock),
-                    stock_codes=int(stock["symbol"].nunique()),
-                    start=str(breadth["date"].min()), end=str(breadth["date"].max()),
-                    ex_rights_rows=int(stock["ex_rights"].sum()) if "ex_rights" in stock else 0,
-                    elapsed_sec=prev.get("elapsed_sec"), cached_sec=round(time.time() - t0, 1),
-                    checks=checks, scope="沪深A股(不含北交所)",
-                    note="复用已解析产物; .day 为不复权, 除权日按东财日历打标",
-                )
-                return breadth, stock
-            logger.warning("缓存 TDX 产物未通过校验(version=%s), 重新解析",
-                           prev.get("parse_version"))
-
-        breadth, stock, bse = parse_zip(zp)
-        if breadth.empty:
-            raise ValueError("解析后 breadth 为空")
-        checks = validate_breadth(breadth, stock, bse)
-        if not checks["sum_matches_total"]:
-            raise ValueError(f"宽度自洽校验失败: {checks['latest']}")
-        from scripts.radar import exrights
-
-        stock = exrights.apply_flags(stock, breadth)
-        store.write_frame("tdx_breadth.parquet", breadth)
-        store.write_frame("tdx_stock.parquet", stock)
-        store.write_frame("tdx_bse_breadth.parquet", bse)
-        store.update_status(
-            "tdx", status="ok", path="hsjday.zip", zip_mb=round(zp.stat().st_size / 1048576, 1),
-            mode="parse", parse_version=PARSE_VERSION,
-            breadth_days=len(breadth), stock_rows=len(stock),
-            stock_codes=int(stock["symbol"].nunique()),
-            start=str(breadth.date.min()), end=str(breadth.date.max()),
-            ex_rights_rows=int(stock["ex_rights"].sum()),
-            elapsed_sec=round(time.time() - t0, 1),
-            checks=checks, scope="沪深A股(不含北交所)",
-            note=".day 为不复权; ex_rights 来自东财分红送配除权除息日(缺失时回退启发式), 跨期收益已排除跨除权样本",
-        )
-        logger.info("TDX 完成 %.0fs: 沪深A股 %s~%s 最新 %s, 个股 %d 只/%d 行, 北交所单列 %d 日",
-                    time.time() - t0, breadth.date.min(), breadth.date.max(),
-                    checks["latest"], stock["symbol"].nunique(), len(stock), len(bse))
-        return breadth, stock
+            if breadth.empty:
+                raise ValueError("无已落盘产物, 不能只跑增量; 请去掉 --incremental 补历史")
+            return breadth, store.read_frame("tdx_stock.parquet")
+        # 冷启动/口径版本变更/产物缺失: 分段补历史(默认一次补完, 可断点续跑)
+        return _staged(zp, t0, all_segments=all_segments, from_year=None, to_year=None)
     except Exception as exc:
         store.update_status("tdx", status="failed", reason=str(exc)[:160])
         logger.error("TDX 解析失败: %s", str(exc)[:200])
@@ -481,8 +653,15 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     ap = argparse.ArgumentParser(description="下载并解析通达信盘后全量包")
     ap.add_argument("--force", action="store_true", help="忽略缓存强制重新下载")
+    ap.add_argument("--incremental", action="store_true", help="只解析缺口, 不补历史")
+    ap.add_argument("--full", action="store_true", help="一次性全量解析(不推荐, 用于应急)")
+    ap.add_argument("--one-segment", action="store_true", help="只补一个缺失年份后退出")
+    ap.add_argument("--from-year", type=int, default=None, help="分段起始年, 如 2024")
+    ap.add_argument("--to-year", type=int, default=None, help="分段结束年, 如 2026")
     args = ap.parse_args()
-    fetch_tdx(force=args.force)
+    mode = "full" if args.full else ("incremental" if args.incremental else "auto")
+    fetch_tdx(force=args.force, mode=mode, all_segments=not args.one_segment,
+              from_year=args.from_year, to_year=args.to_year)
 
 
 if __name__ == "__main__":
