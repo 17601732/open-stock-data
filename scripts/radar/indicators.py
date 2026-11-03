@@ -92,6 +92,8 @@ def trin_source_info() -> dict:
     info["start_date"] = str(csv.index.min())[:10]
     if not idx.empty:
         cal = sorted({str(d)[:10] for d in pd.to_datetime(idx.loc[idx.code == "000300", "date"])})
+        # 盘中未完成的当日交易日不算缺口: 该日 TRIN 快照本来就尚未产生
+        cal = [d for d in cal if pd.Timestamp(d) <= _completed_session(pd.DatetimeIndex(cal))]
         have = {pd.Timestamp(d).strftime("%Y-%m-%d") for d in csv.index}
         missing = [d for d in cal if info["start_date"] <= d <= cal[-1] and d not in have]
         info["missing_dates"] = missing

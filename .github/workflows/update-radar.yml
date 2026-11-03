@@ -92,6 +92,8 @@ jobs:
             echo "快照无变化, 跳过提交"
           else
             git commit -m "chore(radar): update snapshot $(date -u +%Y-%m-%d)"
+            # 其它 workflow(如 TRIN)也可能提交 main, 先 rebase 再推, 避免 non-fast-forward 失败
+            git pull --rebase origin main || true
             git push
           fi
 
