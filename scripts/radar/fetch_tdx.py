@@ -39,7 +39,7 @@ import json
 import logging
 import time
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -62,6 +62,8 @@ TDX_HEADERS = {
     "Accept": "application/zip,*/*",
 }
 MIN_ZIP_BYTES = 450 * 1024 * 1024
+# 直连下载后校验包内最新交易日: 超过 7 个自然日视为 CDN/镜像返回了旧包, 重试一次后失败
+STALE_DAYS = 7
 DETAIL_YEARS = 3           # 个股明细保留近 3 年(形态回测需要足够的跨期样本)
 PARSE_VERSION = 5          # 解析口径版本: 证券类型白名单/volume 过滤/市场前缀主键变更时递增
 
@@ -120,8 +122,36 @@ def _download_once(dest: Path, headers: dict) -> None:
     logger.info("下载完成 %.0f MB", size / 1048576)
 
 
+def _zip_latest_date(zp: Path) -> int:
+    """抽样读 20 个 .day, 返回包内最新交易日(YYYYMMDD); 无可识别文件返回 0。"""
+    members = _parse_members(zp)
+    if not members:
+        return 0
+    step = max(len(members) // 20, 1)
+    latest = 0
+    with zipfile.ZipFile(zp) as zf:
+        for _m, _s, _c, _b, entry in members[::step]:
+            a = _read_day(zf, entry)
+            if len(a):
+                latest = max(latest, int(a["date"][-1]))
+    return latest
+
+
+def _existing_end_num() -> int:
+    """已落盘产物里的最后交易日(YYYYMMDD), 用于判断新包是否比旧包还旧。"""
+    try:
+        b = store.read_frame("tdx_breadth.parquet")
+        return int(str(b["date"].max()).replace("-", "")) if not b.empty else 0
+    except Exception:
+        return 0
+
+
 def ensure_zip(force: bool = False) -> Path:
-    """确保本地有可用的全量包; 24 小时内且体积正常则复用。"""
+    """确保本地有可用的全量包; 24 小时内且体积正常则复用。
+
+    直连 data.tdx.com.cn 下载(带 UA/Referer/Cookie), 下载后校验体积与包内最新交易日;
+    校验不通过删除重下一次, 仍失败则报错, 不用旧包顶上(避免把上周的包当今天的数据)。
+    """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     if CACHE_ZIP.exists() and not force:
         size = CACHE_ZIP.stat().st_size
@@ -129,16 +159,32 @@ def ensure_zip(force: bool = False) -> Path:
         if size >= MIN_ZIP_BYTES and age < 24 * 3600:
             logger.info("复用缓存 %s (%.0f MB, %.1f 小时前)", CACHE_ZIP, size / 1048576, age / 3600)
             return CACHE_ZIP
+    stale_before = int((datetime.now() - timedelta(days=STALE_DAYS)).strftime("%Y%m%d"))
     errors = []
-    for name, hdrs in (("cookie", {**TDX_HEADERS, "Cookie": TDX_COOKIE}), ("plain", TDX_HEADERS)):
-        try:
-            t0 = time.time()
-            _download_once(CACHE_ZIP, hdrs)
-            logger.info("TDX 包下载成功(方式=%s, %.1fs)", name, time.time() - t0)
-            return CACHE_ZIP
-        except Exception as exc:
-            errors.append(f"{name}:{str(exc)[:80]}")
-            logger.warning("下载方式 %s 失败: %s", name, str(exc)[:120])
+    for attempt in (1, 2):
+        for name, hdrs in (("cookie", {**TDX_HEADERS, "Cookie": TDX_COOKIE}), ("plain", TDX_HEADERS)):
+            try:
+                t0 = time.time()
+                _download_once(CACHE_ZIP, hdrs)
+                size = CACHE_ZIP.stat().st_size
+                if size < MIN_ZIP_BYTES:
+                    raise ValueError(f"包体积 {size / 1048576:.0f} MB < {MIN_ZIP_BYTES / 1048576:.0f} MB")
+                latest = _zip_latest_date(CACHE_ZIP)
+                if latest < stale_before:
+                    raise ValueError(f"包内最新交易日 {latest} 过旧(阈值 {stale_before}), 疑似旧包")
+                prev_end = _existing_end_num()
+                if prev_end and latest < prev_end:
+                    raise ValueError(f"包内最新交易日 {latest} 早于已落盘 {prev_end}, 疑似旧包")
+                logger.info("TDX 包下载成功(方式=%s, %.1fs, %.0f MB, 最新交易日 %d)",
+                            name, time.time() - t0, size / 1048576, latest)
+                return CACHE_ZIP
+            except Exception as exc:
+                errors.append(f"{name}:{str(exc)[:80]}")
+                logger.warning("下载方式 %s 失败/校验未过: %s", name, str(exc)[:120])
+        if attempt == 1:
+            logger.warning("包校验未通过, 删除后重试一次")
+            CACHE_ZIP.unlink(missing_ok=True)
+            CACHE_ZIP.with_suffix(".part").unlink(missing_ok=True)
     raise RuntimeError("TDX 包下载失败 " + " | ".join(errors))
 
 
