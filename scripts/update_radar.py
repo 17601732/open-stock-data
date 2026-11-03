@@ -25,11 +25,13 @@ def run(full: bool = False, skip_stocks: bool = False, with_holders: bool = Fals
         android_assets: Path | None = None) -> dict:
     """执行完整流水线, 返回快照字典。"""
     t0 = time.time()
-    # 缓存为空(如 Actions 首次运行/缓存丢失)时自动退化为全量,
-    # 否则只有最近约 60 个交易日的数据, 滚动分位无法满足 min_days, 综合分会为空
-    if not full and store.read_frame("index_daily.parquet").empty:
-        full = True
-        logger.warning("未检测到本地原始数据, 自动切换为全量模式")
+    # 缓存为空/残缺(如 Actions 首次运行、缓存丢失或只存了最近 60 天)时自动退化为全量:
+    # 滚动分位需要每只指数至少 250 个交易日, 数据不够时综合分会为空
+    if not full:
+        idx_existing = store.read_frame("index_daily.parquet")
+        if idx_existing.empty or len(idx_existing) < 600:
+            full = True
+            logger.warning("本地原始数据不足(指数 %d 行), 自动切换为全量模式", len(idx_existing))
     logger.info("1/4 抓取输入数据")
     fetch_inputs.fetch_all(full=full, with_holders=with_holders, skip_stocks=skip_stocks)
 
@@ -42,6 +44,11 @@ def run(full: bool = False, skip_stocks: bool = False, with_holders: bool = Fals
         logger.info("异常值筛查: %d 个可疑点已置为缺失", len(anomaly_flags))
     comp, detail = indicators.build_composite(ind)
     if comp.empty:
+        # 兜底: 增量数据不足以算分位时, 自动全量重算一次, 避免每日定时任务直接失败
+        if not full:
+            logger.warning("综合分为空, 自动回退全量重算")
+            return run(full=True, skip_stocks=skip_stocks, with_holders=with_holders,
+                       android_assets=android_assets)
         raise RuntimeError("综合分为空: 可用指标权重覆盖率不足")
     signals = indicators.extract_signals(comp)
     logger.info("综合分 %s ~ %s, 信号 top=%d bottom=%d",
