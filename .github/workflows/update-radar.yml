@@ -2,11 +2,10 @@ name: Update Radar Snapshot
 
 on:
   schedule:
-    # 北京时间 18:30 (UTC 10:30), 收盘后数据定稿
-    - cron: "30 10 * * 1-5"
-    # 兜底重试: 北京时间 21:30 (UTC 13:30)。GitHub 定时任务常延迟数小时甚至跳过,
-    # 第二次运行是幂等的(同日期重复 upsert), 可显著降低「当天漏跑」概率
-    - cron: "30 13 * * 1-5"
+    # 通达信日线全量包发布晚于 18:30(实测 21:00 下载才含当日), 晚场放到 22:00 (UTC 14:00)
+    - cron: "0 14 * * 1-5"
+    # 次日早场补缺: 北京时间 07:00 (UTC 23:00, 周二~周六), 幂等, 防晚场失败/被跳过
+    - cron: "0 23 * * 1-5"
   workflow_dispatch:
     inputs:
       full:
@@ -71,6 +70,11 @@ jobs:
 
       - name: Verify snapshot
         run: |
+          # 前置守卫命中: 包内最新交易日未到应到交易日 → 不覆盖快照, 明确标注并正常退出
+          if [ -f data/radar/fetch_status.json ] && grep -q 'package_not_updated' data/radar/fetch_status.json; then
+            echo "::notice::package_not_updated: TDX 包未更新到应到交易日, 本次未解析/未覆盖快照, 等下一次 cron"
+            exit 0
+          fi
           test -s data/radar/snapshot.json
           uv run python - <<'PY'
           import json

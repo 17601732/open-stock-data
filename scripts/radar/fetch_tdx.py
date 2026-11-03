@@ -67,6 +67,10 @@ STALE_DAYS = 7
 DETAIL_YEARS = 3           # 个股明细保留近 3 年(形态回测需要足够的跨期样本)
 PARSE_VERSION = 5          # 解析口径版本: 证券类型白名单/volume 过滤/市场前缀主键变更时递增
 
+
+class PackageNotUpdated(RuntimeError):
+    """包已下载但内容仍是上一交易日: 不落库、不覆盖快照, 等下一次 cron。"""
+
 DAY_DTYPE = np.dtype([
     ("date", "<i4"), ("open", "<i4"), ("high", "<i4"), ("low", "<i4"),
     ("close", "<i4"), ("amount", "<f4"), ("volume", "<i4"), ("reserved", "<i4"),
@@ -146,19 +150,37 @@ def _existing_end_num() -> int:
         return 0
 
 
-def ensure_zip(force: bool = False) -> Path:
-    """确保本地有可用的全量包; 24 小时内且体积正常则复用。
+def _expected_latest_num(now: datetime | None = None) -> int:
+    """当前应到交易日: 工作日盘后(>=15:30)为当日, 否则为上一个工作日。"""
+    now = now or datetime.now()
+    after_close = now.hour * 60 + now.minute >= 15 * 60 + 30
+    d = now.date()
+    if not after_close:
+        d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return int(d.strftime("%Y%m%d"))
 
-    直连 data.tdx.com.cn 下载(带 UA/Referer/Cookie), 下载后校验体积与包内最新交易日;
-    校验不通过删除重下一次, 仍失败则报错, 不用旧包顶上(避免把上周的包当今天的数据)。
+
+def ensure_zip(force: bool = False) -> tuple[Path, int]:
+    """确保本地有可用的全量包, 返回 (路径, 包内最新交易日)。
+
+    缓存在 24h 内且体积正常时仍需抽检包内最新日期: 通达信日线包发布晚于 18:30,
+    只用 mtime 会一直复用 16:30 下的旧包。直连 data.tdx.com.cn 下载后校验体积与
+    包内最新交易日; 校验不通过删除重下一次, 仍失败则报错。
     """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    expected = _expected_latest_num()
     if CACHE_ZIP.exists() and not force:
         size = CACHE_ZIP.stat().st_size
         age = time.time() - CACHE_ZIP.stat().st_mtime
+        latest = _zip_latest_date(CACHE_ZIP)
+        if size >= MIN_ZIP_BYTES and age < 24 * 3600 and latest >= expected:
+            logger.info("复用缓存 %s (%.0f MB, %.1f 小时前, 最新交易日 %d)",
+                        CACHE_ZIP, size / 1048576, age / 3600, latest)
+            return CACHE_ZIP, latest
         if size >= MIN_ZIP_BYTES and age < 24 * 3600:
-            logger.info("复用缓存 %s (%.0f MB, %.1f 小时前)", CACHE_ZIP, size / 1048576, age / 3600)
-            return CACHE_ZIP
+            logger.info("缓存包最新交易日 %d 未到应到交易日 %d, 重新下载", latest, expected)
     stale_before = int((datetime.now() - timedelta(days=STALE_DAYS)).strftime("%Y%m%d"))
     errors = []
     for attempt in (1, 2):
@@ -177,7 +199,7 @@ def ensure_zip(force: bool = False) -> Path:
                     raise ValueError(f"包内最新交易日 {latest} 早于已落盘 {prev_end}, 疑似旧包")
                 logger.info("TDX 包下载成功(方式=%s, %.1fs, %.0f MB, 最新交易日 %d)",
                             name, time.time() - t0, size / 1048576, latest)
-                return CACHE_ZIP
+                return CACHE_ZIP, latest
             except Exception as exc:
                 errors.append(f"{name}:{str(exc)[:80]}")
                 logger.warning("下载方式 %s 失败/校验未过: %s", name, str(exc)[:120])
@@ -641,19 +663,32 @@ def fetch_tdx(force: bool = False, mode: str = "auto", all_segments: bool = True
     """
     t0 = time.time()
     try:
-        zp = ensure_zip(force)
+        zp, latest = ensure_zip(force)
         # 缓存包可能来自被截断/被反爬页替换的旧下载: 先扫成员, 0 个则丢弃重下
         members = _parse_members(zp)
         if not members:
             logger.warning("缓存包内无 A 股 .day, 删除后重新下载")
             zp.unlink(missing_ok=True)
-            zp = ensure_zip(force=True)
+            zp, latest = ensure_zip(force=True)
             members = _parse_members(zp)
             if not members:
                 with zipfile.ZipFile(zp) as zf:
                     sample = zf.namelist()[:5]
                 raise ValueError(f"包内无可识别 A 股 .day (%.1f MB), namelist 样例={sample}"
                                  % (zp.stat().st_size / 1048576))
+
+        # 前置守卫: 包已下载但还没更新到应到交易日 → 不落库、不覆盖快照, 等下一次 cron
+        expected = _expected_latest_num()
+        if latest < expected:
+            store.update_status(
+                "tdx", status="package_not_updated", path="hsjday.zip",
+                zip_mb=round(zp.stat().st_size / 1048576, 1),
+                zip_latest=latest, expected_trading_day=expected,
+                checked_at=datetime.now().isoformat(timespec="seconds"),
+                note="包内最新交易日未到应到交易日, 本次不解析、不落库、不覆盖快照")
+            logger.warning("package_not_updated: 包内最新交易日 %d < 应到交易日 %d, 不落库不覆盖快照",
+                           latest, expected)
+            raise PackageNotUpdated(f"package_not_updated: {latest} < {expected}")
 
         prev = store.read_status().get("tdx", {})
         has_products = (store.DATA_DIR / "tdx_breadth.parquet").exists() and \
@@ -686,6 +721,8 @@ def fetch_tdx(force: bool = False, mode: str = "auto", all_segments: bool = True
             return breadth, store.read_frame("tdx_stock.parquet")
         # 冷启动/口径版本变更/产物缺失: 分段补历史(默认一次补完, 可断点续跑)
         return _staged(zp, t0, all_segments=all_segments, from_year=None, to_year=None)
+    except PackageNotUpdated:
+        raise # 状态已标记为 package_not_updated, 不能被下面的 failed 覆盖
     except Exception as exc:
         store.update_status("tdx", status="failed", reason=str(exc)[:160])
         logger.error("TDX 解析失败: %s", str(exc)[:200])

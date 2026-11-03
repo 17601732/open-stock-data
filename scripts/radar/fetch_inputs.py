@@ -796,6 +796,8 @@ def fetch_all(full: bool = False, with_holders: bool = False, skip_stocks: bool 
         logger.info("→ 抓取 %s", name)
         try:
             fn()
+        except fetch_tdx.PackageNotUpdated:
+            raise # 包未更新到应到交易日: 终止整条流水线, 不落库不覆盖快照
         except Exception as exc:
             logger.error("数据源 %s 失败: %s", name, str(exc)[:160])
             store.update_status(name, status="failed", reason=str(exc)[:160])
