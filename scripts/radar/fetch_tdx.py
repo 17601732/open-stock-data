@@ -39,7 +39,7 @@ import json
 import logging
 import time
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -155,7 +155,7 @@ def _expected_latest_num(now: datetime | None = None) -> int:
 
     显式换算北京时间: Actions runner 是 UTC, 用本地时钟会把 23:00 CST 误判成 15:00(盘前)。
     """
-    now = now or (datetime.now(timezone.utc) + timedelta(hours=8))
+    now = now or (datetime.now(UTC) + timedelta(hours=8))
     after_close = now.hour * 60 + now.minute >= 15 * 60 + 30
     d = now.date()
     if not after_close:
