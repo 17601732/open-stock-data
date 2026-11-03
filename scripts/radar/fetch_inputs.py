@@ -237,12 +237,86 @@ def _fetch_one_stock(code: str, start: str) -> pd.DataFrame:
     return d
 
 
+def _stocks_from_tdx(pool: pd.DataFrame) -> pd.DataFrame:
+    """把 TDX 全市场个股明细裁剪成样本池行, 并换算成 stock_daily 口径。
+
+    TDX 无换手率/流通股本: 用最近一次已知流通市值(由 API 历史 amount/turnover 反推)
+    换算 turnover, 流通股本变化很慢, 近似误差可忽略; 无历史市值的代码留空。
+    """
+    tdx = store.read_frame("tdx_stock.parquet")
+    old = store.read_frame("stock_daily.parquet")
+    if not old.empty:
+        # 清掉历史上误写入的非 ISO 日期行(TDX YYYYMMDD), 避免增量库里两种日期格式混存
+        iso = old["date"].astype(str).str.match(r"^\d{4}-\d{2}-\d{2}$")
+        if not iso.all():
+            old = old[iso].copy()
+            store.write_frame("stock_daily.parquet", old)
+            logger.warning("stock_daily 清理了 %d 行非标准日期", int((~iso).sum()))
+    caps: dict[str, float] = {}
+    if not old.empty and "turnover" in old.columns:
+        last = old.sort_values("date").groupby("code").tail(1)
+        cap = last["amount"] / (pd.to_numeric(last["turnover"], errors="coerce") / 100.0)
+        caps = cap.replace([np.inf, -np.inf], np.nan).dropna().to_dict()
+    sub = tdx[tdx["code"].isin(set(pool["code"]))].copy()
+    if sub.empty:
+        return pd.DataFrame(columns=store.STOCK_SCHEMA)
+    cap = sub["code"].map(caps)
+    out = pd.DataFrame({
+        "code": sub["code"],
+        "date": pd.to_datetime(sub["date"].astype(str), format="%Y%m%d").dt.strftime("%Y-%m-%d"),
+        "close": sub["close"].astype(float),
+        "pct_chg": (sub["close"] / sub["prev_close"].replace(0, np.nan) - 1.0) * 100.0,
+        "volume": sub["volume"].astype(float),
+        "amount": sub["amount"].astype(float),
+        "turnover": (sub["amount"] / cap.replace(0, np.nan)) * 100.0,
+    })
+    return out.dropna(subset=["close"])
+
+
 def fetch_stock_daily(full: bool = False, workers: int = 8, limit: int | None = None) -> pd.DataFrame:
-    """抓取样本池个股日线; 已存在的股票只补缺失日期, 逐批落盘便于续抓。"""
+    """个股日线: 优先用 TDX 全量包产物, 缺失代码/包解析失败时才逐只走接口。"""
     pool = store.read_frame("pool.csv")
     if pool.empty:
         pool = fetch_pool_symbols()
     pool["code"] = pool["code"].astype(str).str.zfill(6)
+
+    tdx = store.read_frame("tdx_stock.parquet")
+    source = "api"
+    if not tdx.empty:
+        latest = str(tdx["date"].max())[:10]
+        idx_last = ""
+        idx = store.read_frame("index_daily.parquet")
+        if not idx.empty:
+            idx_last = str(idx["date"].max())[:10]
+        # 包内最新交易日落后指数 5 个自然日以上视为过期, 走接口兜底
+        fresh = not idx_last or latest >= str(pd.Timestamp(idx_last) - pd.Timedelta(days=5))[:10]
+        if fresh:
+            derived = _stocks_from_tdx(pool)
+            missing = set(pool["code"]) - set(derived["code"].unique())
+            if not derived.empty:
+                store.upsert("stock_daily.parquet", derived, ["code", "date"])
+                source = "tdx"
+                store.update_status("stock_daily", status="ok" if not missing else "partial",
+                                    stock_source="tdx", rows_from_tdx=len(derived),
+                                    tdx_latest=latest, codes=int(derived["code"].nunique()),
+                                    missing_codes=sorted(missing)[:10],
+                                    missing_count=len(missing),
+                                    start=str(derived["date"].min()), end=latest,
+                                    note="TDX 全量包解析; 换手率由最近已知流通市值换算; 接口仅作兜底")
+                logger.info("个股日线来源 TDX: %d 行, 缺 %d 只", len(derived), len(missing))
+                if not missing:
+                    return store.read_frame("stock_daily.parquet")
+                # 个别代码 TDX 无数据(新股/长期停牌), 只对这些走接口
+                pool = pool[pool["code"].isin(missing)].copy()
+            else:
+                logger.warning("TDX 明细裁剪为空, 回退接口")
+    store.update_status("stock_daily", stock_source=source)
+    return _fetch_stock_daily_api(pool, full=full, workers=workers, limit=limit)
+
+
+def _fetch_stock_daily_api(pool: pd.DataFrame, full: bool = False,
+                           workers: int = 8, limit: int | None = None) -> pd.DataFrame:
+    """(兜底)抓取样本池个股日线; 已存在的股票只补缺失日期, 逐批落盘便于续抓。"""
     existing = store.read_frame("stock_daily.parquet")
     done_codes = set(existing.code.unique()) if not existing.empty else set()
     last_dates = existing.groupby("code")["date"].max().to_dict() if not existing.empty else {}
@@ -616,15 +690,22 @@ def fetch_holder_change(full: bool = False) -> pd.DataFrame:
 def fetch_all(full: bool = False, with_holders: bool = False, skip_stocks: bool = False) -> dict:
     """按顺序抓取全部输入; 单源失败不影响其它源。"""
     started = datetime.now().isoformat(timespec="seconds")
+    from scripts.radar import boards, exrights, fetch_tdx
+
     steps = [
         ("index_daily", lambda: fetch_index_daily(full)),
+        # 除权日历先于 TDX: 包解析后直接按权威日历打标(失败则用启发式跳空兜底)
+        ("ex_rights", lambda: exrights.fetch_ex_rights(force=False)),
+        # 全量包解析失败不阻断: 个股会自动回退逐只接口, 并在 fetch_status.stock_source 标注
+        ("tdx", lambda: fetch_tdx.fetch_tdx(force=False)),
         ("pool", fetch_pool_symbols),
+        ("boards", lambda: boards.fetch_board_members(force=False)),
         ("bond_yield", fetch_bond_yield),
         ("margin_daily", fetch_margin),
         ("valuation", fetch_valuation),
     ]
     if not skip_stocks:
-        steps.insert(2, ("stock_daily", lambda: fetch_stock_daily(full)))
+        steps.insert(3, ("stock_daily", lambda: fetch_stock_daily(full)))
     steps.append(("option_pcr", lambda: fetch_option_pcr(full)))
     if with_holders:
         steps.append(("holder_change", fetch_holder_change))

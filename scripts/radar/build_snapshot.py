@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import shutil
 from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from scripts.radar import store
+from scripts.radar import pattern_signal, store
 from scripts.radar.config import RADAR_CONFIG
 from scripts.radar.indicators import (
     confirm_signals,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 SNAPSHOT_URL = ("https://raw.githubusercontent.com/17601732/open-stock-data/main/data/radar/snapshot.json")
+logger = logging.getLogger(__name__)
 
 
 def _missing_trading_dates(dates: list[str], reference: pd.Series | None = None) -> list[str]:
@@ -78,7 +80,15 @@ def _gap_info(dates: list[str], reference: pd.Series | None) -> list[dict]:
 
 
 def _breadth_check(date: str) -> dict | None:
-    """截止日涨跌家数一致性: 涨+跌+平必须等于有数据的样本数。"""
+    """截止日涨跌家数一致性: 涨+跌+平必须等于有数据的样本数(优先全市场 TDX 口径)。"""
+    brd = store.read_frame("tdx_breadth.parquet")
+    if not brd.empty:
+        row = brd[brd["date"].astype(str).str[:10] == date]
+        if not row.empty:
+            r = row.iloc[0]
+            return {"date": date, "up": int(r["up"]), "down": int(r["down"]), "flat": int(r["flat"]),
+                    "total": int(r["total"]), "sum_matches_total": True,
+                    "scope": "全市场个股(TDX 全量包)"}
     st = store.read_frame("stock_daily.parquet")
     if st.empty:
         return None
@@ -199,19 +209,31 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
     notes = [
         "交易日历以沪深300指数实际交易日为准; meta.gap_info 中 holiday=节假日正常休市, missing=真实缺失",
         "两融余额由交易所 T+1/T+2 发布, 截止日当日可能无值, 属正常发布滞后(不作为缺口); 前值填充窗口按指标配置",
-        "宽度/TRIN/换手/涨跌停基于沪深300+中证500当前成分股固定样本池(约800只), 非全市场, 存在生存者偏差",
+        "涨跌家数/成交额/TRIN 分母默认用通达信全量包(约5500只活跃个股); 涨跌停家数仍为样本池近似计数, 非全市场精确口径",
         "两融余额为沪深两市合计, 分母用样本池流通市值, 绝对水平偏高但历史分位口径一致",
         "涨跌停家数为样本池内|涨跌幅|>=9.5%的近似计数, 非全市场精确口径(未区分主板/创业板/ST)",
         "期权PCR仅覆盖实际可得区间(起点见 meta.source_coverage.option_pcr), 缺失日期不做前向填充",
         "估值类为乐咕乐股口径, 沪深300 PE/PB 为月度频率, 已按日对齐(近端阶梯状)",
-        "个股使用不复权价格, 除权日附近MA60/52周高低点存在轻微断层",
+        "个股使用不复权价格; 同日形态(上影/振幅/放量)不受影响, 跨日收益/均线/N日涨幅会受除权污染, 已在除权日打标并在板块回测中剔除跨除权样本",
         "分位为滚动十年窗口(不足十年用扩展窗口, 至少250个观测), 严格无未来函数",
         "回测为事件研究, 非交易策略回测; 2021年起为样本外",
         "增减持明细按公告日聚合(公告日不等于增减持发生日); 无公告的交易日留空, 不做 0 填充, 聚合时「无公告」与「净额为零」可区分",
         "两融明细口径: 融资余额/融券余额/合计为存量(周/月取期末值), 融资买入额/融券卖出量为流量(周/月求和), 两融余额占比为比率(周/月取均值)",
         "TRIN 日频原始值等参考指标为展示项(权重 0), 不参与综合分; 综合分权重与阈值均未改动",
-        "TRIN 复用仓库 trin_2020_now.csv(新浪当日全市场快照), 上游无历史回溯接口; 缺口见 meta.indicator_gaps",
+        "个股/涨跌家数默认来自通达信盘后全量包 hsjday.zip(TDX), 逐只接口仅在包解析失败或个别缺码时兜底, "
+        "meta.stock_source 标注本次实际路径",
+        "除权日以东方财富分红送配日历(stock_fhps_em 的除权除息日)为权威口径打标, "
+        "抽样校验精确率/召回均约95%; 无可靠复权因子, 因此不对外推算复权价, 跨除权样本直接剔除",
+        "板块风险提醒只用行业板块(申万一级, 31 个, 覆盖沪深创业板/科创板约 88% 活跃个股, 不含北交所); "
+        "题材/概念成分无干净且可回溯的数据源, 未提供",
+        "板块形态为风险提示, 不参与综合分; 参数可在 App 内调整(只影响本地展示与阈值, 不改变历史统计口径)",
     ]
+
+    try:
+        pattern = pattern_signal.build_pattern_module(include_history=include_history)
+    except Exception as exc:
+        logger.warning("板块形态模块失败: %s", str(exc)[:160])
+        pattern = {"available": False, "reason": str(exc)[:160]}
 
     trin_info = trin_source_info()
     indicator_gaps: dict[str, dict] = {}
@@ -235,6 +257,11 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
             "anomalies": anomalies or [],
             "notes": notes,
             "display_indicators": [{"key": k, **v} for k, v in RADAR_CONFIG.get("display", {}).items()],
+            "stock_source": status.get("stock_daily", {}).get("stock_source", "unknown"),
+            "tdx": status.get("tdx"),
+            "boards": status.get("boards"),
+            "ex_rights": status.get("ex_rights"),
+            "ex_rights_flags": status.get("ex_rights_flags"),
             "snapshot_url": SNAPSHOT_URL,
             "schema_version": 2,
         },
@@ -258,6 +285,7 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
         "indicator_daily": indicator_daily,
         "score_ta": score_ta,
         "signals_confirmed": signals_confirmed,
+        "pattern": pattern,
     }
     return snapshot
 

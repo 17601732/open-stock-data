@@ -59,6 +59,21 @@ RADAR_CONFIG: dict = {
             {"label": "2024年初微盘股流动性危机(分布外)", "start": "2024-01-01", "end": "2024-06-30"},
         ],
     },
+    # 板块「放量长上影线」风险提醒(独立模块, 不参与综合分)
+    "pattern": {
+        "shadow_ratio": 0.5,        # 上影线 / 当日振幅 ≥ 0.5: 一半以上振幅落在上影线
+        "shadow_body_mult": 2.0,    # 上影线 ≥ 实体 2 倍: 排除小实体但上影不突出的样本
+        "volume_mult": 2.0,         # 当日量 ≥ 前 20 日均量 2 倍: 约对应放量前 5% 分位
+        "volume_window": 20,
+        "min_amplitude": 0.005,     # 振幅下限, 过滤一字板/停牌式假信号
+        "position_window": 60,      # 可选位置条件: 距 60 日高点 ≤ 5%
+        "position_high_pct": None,  # None=关闭位置条件(默认), 5.0=仅高位
+        "sector_min_count": 3,      # 同一板块同日命中 ≥3 只
+        "sector_min_share": 0.10,   # 或占板块可交易只数 ≥10%
+        "forward_days": [5, 10, 20],
+        "note": ("放量长上影线: 上影线/振幅≥0.5 且 上影≥实体2倍 且 量≥20日均量2倍; "
+                 "板块同日≥3只或≥10%触发; 位置条件默认关闭, 可配置开启"),
+    },
     # 仅展示、不参与综合分的参考指标; 权重为 0, 不进入 composite.weights
     "display": {
         "trin_raw": {"name": "阿姆氏值TRIN(日频原始)", "group": "宽度", "unit": "比值",

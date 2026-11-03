@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from scripts.radar.config import RADAR_CONFIG
 
 EPS = 1e-9
 TRIN_CSV = Path(__file__).resolve().parents[2] / "trin_2020_now.csv"
+logger = logging.getLogger(__name__)
 
 
 def _repo_trin() -> pd.DataFrame | None:
@@ -72,15 +74,38 @@ def _pool_panel() -> pd.DataFrame:
 def trin_source_info() -> dict:
     """TRIN 数据来源与缺口诊断(供快照元数据与 App 详情页提示)。
 
-    结论: trin_raw/trin_30d 复用仓库 trin_2020_now.csv, 该文件由
-    scripts/calc_trin_30d.py 从新浪「当日全市场快照」生成, 上游没有历史回溯接口,
-    因此历史缺失日无法任意补抓, 只能靠每日运行落库(次日开盘前运行可补回上一交易日)。
+    当前口径: 优先用 TDX 全量包(tdx_breadth.parquet)的全市场涨跌家数/成交量重算,
+    数据可按交易日回补(包内是完整历史, 漏跑一天也能补齐); TDX 缺失时退回仓库
+    trin_2020_now.csv(新浪当日快照, 历史不可回溯, 只能靠每日落库)。
     """
-    csv = _repo_trin()
+    brd = store.read_frame("tdx_breadth.parquet")
     idx = store.read_frame("index_daily.parquet")
-    info: dict = {
+    if not brd.empty:
+        bdates = sorted(str(d)[:10] for d in brd["date"])
+        info: dict = {
+            "key": "trin_raw",
+            "source": "tdx_breadth.parquet (通达信全量包全市场)",
+            "recoverable": True,
+            "upstream": "data.tdx.com.cn/vipdoc/hsjday.zip (完整历史, 可回补)",
+            "last_date": bdates[-1], "start_date": bdates[0],
+        }
+        if not idx.empty:
+            cal = sorted({str(d)[:10] for d in pd.to_datetime(idx.loc[idx.code == "000300", "date"])})
+            cal = [d for d in cal if pd.Timestamp(d) <= _completed_session(pd.DatetimeIndex(cal))]
+            have = set(bdates)
+            missing = [d for d in cal if bdates[0] <= d <= cal[-1] and d not in have]
+            info["missing_dates"] = missing
+            info["status"] = "partial" if missing else "ok"
+            info["missing_reason"] = "上游包未包含该交易日" if missing else None
+        else:
+            info["missing_dates"] = []
+            info["status"] = "unknown"
+        return info
+
+    csv = _repo_trin()
+    info = {
         "key": "trin_raw",
-        "source": "trin_2020_now.csv (Sina 当日全市场快照)",
+        "source": "trin_2020_now.csv (Sina 当日全市场快照, TDX 不可用时的兜底)",
         "recoverable": False,
         "upstream": "Market_Center.getHQNodeData (snapshot only)",
     }
@@ -124,6 +149,18 @@ def build_indicators() -> pd.DataFrame:
         bond["date"] = pd.to_datetime(bond["date"])
         out["cn10y"] = bond.set_index("date")["cn10y"].sort_index()
 
+    # 全市场涨跌家数/上涨量/下跌量: 优先用 TDX 全量包产物(2014 起, 无需逐只接口)
+    brd = store.read_frame("tdx_breadth.parquet")
+    tdx_breadth = not brd.empty
+    if tdx_breadth:
+        b = brd.set_index(pd.to_datetime(brd["date"])).sort_index()
+        out["adv_pct_5d"] = b["adv_pct"].rolling(5, min_periods=3).mean()
+        out["trin_raw"] = b["trin_raw"]
+        out["trin_30d"] = b["trin_raw"].rolling(30, min_periods=10).mean()
+        out["breadth_up"] = b["up"]
+        out["breadth_down"] = b["down"]
+        out["market_amount"] = b["amount"]
+
     panel = _pool_panel()
     pool_cap = pd.Series(dtype=float)
     if not panel.empty:
@@ -133,10 +170,11 @@ def build_indicators() -> pd.DataFrame:
         amt_up = by.apply(lambda d: d.amount[d.pct_chg > 0].sum(), include_groups=False)
         amt_dn = by.apply(lambda d: d.amount[d.pct_chg < 0].sum(), include_groups=False)
 
-        out["adv_pct_5d"] = ((adv / (adv + dec + EPS)).rolling(5, min_periods=1).mean())
-        trin = ((adv + 0.5) / (dec + 0.5)) / ((amt_up + 1.0) / (amt_dn + 1.0))
-        out["trin_30d"] = trin.rolling(30, min_periods=10).mean()
-        out["trin_raw"] = trin
+        if not tdx_breadth:
+            out["adv_pct_5d"] = ((adv / (adv + dec + EPS)).rolling(5, min_periods=1).mean())
+            trin = ((adv + 0.5) / (dec + 0.5)) / ((amt_up + 1.0) / (amt_dn + 1.0))
+            out["trin_30d"] = trin.rolling(30, min_periods=10).mean()
+            out["trin_raw"] = trin
         out["turnover"] = by["turnover"].median()
         cap = by["float_cap"].sum()
         pool_cap = cap
@@ -205,8 +243,8 @@ def build_indicators() -> pd.DataFrame:
         out["holder_inc_count"] = hc[inc].groupby("date")["code"].nunique()
         out["holder_dec_count"] = hc[~inc].groupby("date")["code"].nunique()
 
-    # 优先复用仓库既有全市场 TRIN(2020 起); 缺失时用上面的样本池估算
-    repo_trin = _repo_trin()
+    # TDX 不可用时才退回仓库既有全市场 TRIN(2020 起) → 再退回样本池估算
+    repo_trin = None if tdx_breadth else _repo_trin()
     if repo_trin is not None:
         idx = pd.to_datetime(repo_trin.index)
         out["trin_raw"] = pd.Series(repo_trin["trin_raw"].to_numpy(dtype=float), index=idx)
@@ -237,6 +275,15 @@ def build_indicators() -> pd.DataFrame:
         # 只保留已完成交易日: 北京时间 15:30 前抓到当天的指数日线是盘中未完成值,
         # 若把它当成收盘数据会导致快照 cutoff 提前一天、指标失真(如 MA60 掉值)。
         df = df.loc[: _completed_session(trading)]
+
+    # TDX 包在收盘后约 17:00 才更新, 若指数已有当日数据而家数没有, 会出现
+    # 「价格指标用当日值、涨跌家数用前一日 ffill」的混口径; 此时整体截断到最后一天有家数的日期。
+    if tdx_breadth and len(df):
+        last_brd = pd.Timestamp(sorted({str(d)[:10] for d in brd["date"]})[-1])
+        if df.index.max() > last_brd:
+            logger.info("TDX 家数落后指数(%s < %s), 指标截断至 %s",
+                        last_brd.date(), df.index.max().date(), last_brd.date())
+            df = df.loc[:last_brd]
 
     # 增减持是流量: 无公告的交易日保持缺失, 不做 0 填充。
     # 这样「当月无公告(无数据)」与「当月有公告但增持=减持(净额为零)」在聚合时才可区分。

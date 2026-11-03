@@ -25,6 +25,8 @@ jobs:
     concurrency:
       group: update-radar
       cancel-in-progress: false
+    # 全量包 526MB 下载(约 20s) + 解压解析(约 2.5 分钟) + 抓取/回测/导出, 正常 <8 分钟
+    timeout-minutes: 45
     permissions:
       contents: write
 
@@ -53,6 +55,8 @@ jobs:
         continue-on-error: true
         run: uv run python scripts/calc_trin_30d.py
 
+      # 通达信全量包 hsjday.zip(约 526MB)在 data/radar/tdx 下, 随上面的缓存一起恢复;
+      # 解析产物(个股 3 年明细 ~82MB、逐日家数 0.26MB)也只在缓存里, 不入 git。
       - name: Update radar inputs
         env:
           INPUT_FULL: ${{ github.event.inputs.full || 'false' }}
@@ -77,17 +81,32 @@ jobs:
           assert 'trin_raw' in d['indicator_daily']['values'], "TRIN 日频序列缺失"
           assert len(pcr) >= 100 and pcr[-1][0] >= cutoff, f"pcr 序列疑似断档: {pcr[-1]} vs {cutoff}"
           gaps = d['meta'].get('indicator_gaps', {})
+          bc = d['meta'].get('breadth_check') or {}
+          assert bc.get('sum_matches_total'), f"涨跌家数不自洽: {bc}"
+          src = d['meta'].get('stock_source')
+          if src != 'tdx':
+              print(f"::warning::本次个股/家数走了接口兜底路径(stock_source={src}), 非 TDX 全量包")
           print('cutoff', cutoff, 'score', d['latest']['score'],
                 'indicators', len(d['indicators']), 'signals', len(d['signals']),
                 'pcr_weekly', len(pcr), pcr[-1],
+                'stock_source', d['meta'].get('stock_source'),
+                'breadth', bc.get('scope'), bc.get('up'), bc.get('down'), bc.get('flat'),
                 'trin_gap', gaps.get('trin_raw', {}).get('missing_dates', []))
+          pat = d.get('pattern') or {}
+          if pat.get('available'):
+              print('pattern', pat['date'], 'signals', len(pat['signals']),
+                    'history', pat.get('history_events'),
+                    'boards', pat['universe']['boards'])
+          else:
+              print('pattern unavailable:', pat.get('reason'))
           PY
 
       - name: Commit snapshot
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/radar/snapshot.json trin_2020_now.csv
+          # 只提交精简产物(逐日家数 0.3MB / 板块成分 60KB); 原始 zip 与个股明细仅留在缓存
+          git add data/radar/snapshot.json trin_2020_now.csv data/radar/tdx_breadth.parquet data/radar/board_members.parquet
           if git diff --cached --quiet; then
             echo "快照无变化, 跳过提交"
           else
