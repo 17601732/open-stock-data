@@ -7,12 +7,25 @@ import ast
 from datetime import datetime, timedelta, timezone
 
 
-def target_trade_date() -> str:
+def _trading_calendar() -> list[str]:
+    try:
+        import akshare as ak
+
+        df = ak.tool_trade_date_hist_sina()
+        return sorted({str(x)[:10] for x in df["trade_date"]})
+    except Exception as exc:  # noqa: BLE001
+        print(f"交易日历不可用, 退回工作日推断: {exc}")
+        return []
+
+
+def target_trade_date() -> str | None:
     """确定快照对应的交易日。
 
     新浪全市场接口只提供「当前快照」, 没有历史回溯能力, 因此日期必须由运行时刻推断:
     - 环境变量 TARGET_DATE(YYYYMMDD/YYYY-MM-DD) 显式指定时优先使用(用于补跑当日)
-    - 北京时间 15:00 之后按当天; 15:00 之前或周末按上一交易日
+    - 交易日 15:30 之后: 写当天收盘快照
+    - 交易日盘中(09:15~15:30): 不写(快照是当天未完成数据, 标成上一交易日会污染历史)
+    - 非交易日: 快照仍是上一交易日收盘, 写最近一个交易日
     GitHub cron 经常延迟数小时, 若直接用 wall clock 的日期, 延迟到次日凌晨会把
     当日收盘快照错误标成新的一天, 从而漏掉真实交易日。
     """
@@ -23,9 +36,22 @@ def target_trade_date() -> str:
             return f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
     # 统一按 UTC+8 计算, 本机(北京时区)与 GitHub runner(UTC)结果一致
     now = datetime.now(timezone.utc) + timedelta(hours=8)
+    minutes = now.hour * 60 + now.minute
+    today = now.strftime("%Y-%m-%d")
+
+    cal = _trading_calendar()
+    if cal:
+        if today in set(cal):
+            return today if minutes >= 15 * 60 + 30 else None
+        prior = [d for d in cal if d < today]
+        return prior[-1] if prior else None
+
+    # 交易日历不可用时的保守回退: 工作日盘中一律不写
+    if now.weekday() < 5:
+        if minutes < 15 * 60 + 30:
+            return None
+        return today
     day = now
-    if now.hour < 15:
-        day = now - timedelta(days=1)
     while day.weekday() >= 5:
         day -= timedelta(days=1)
     return day.strftime("%Y-%m-%d")
@@ -159,6 +185,9 @@ def update_csv_and_plot(date_str, up_count, down_count, up_vol, down_vol, trin_r
 
 if __name__ == "__main__":
     latest_date = target_trade_date()
+    if latest_date is None:
+        print("当前为交易日盘中(未收盘), 快照不完整, 跳过写入(不算失败)。")
+        raise SystemExit(0)
     print(f"目标交易日: {latest_date}")
 
     u_c, d_c, u_v, d_v, t_raw = fetch_today_data()

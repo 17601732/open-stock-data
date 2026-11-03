@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +39,17 @@ def _repo_trin() -> pd.DataFrame | None:
         return None
     d["date"] = pd.to_datetime(d["date"]).dt.strftime("%Y-%m-%d")
     return d[["date", "trin_raw", "trin_ma30"]].dropna().drop_duplicates("date").set_index("date").sort_index()
+
+
+def _completed_session(trading: pd.DatetimeIndex) -> pd.Timestamp:
+    """最后一个已完成交易日(北京时间 15:30 前, 当天日线仍属盘中未完成数据)。"""
+    now = datetime.now(UTC) + timedelta(hours=8)
+    today = pd.Timestamp(now.date())
+    if now.hour * 60 + now.minute < 15 * 60 + 30 and today in trading:
+        prior = trading[trading < today]
+        if len(prior):
+            return prior.max()
+    return trading.max()
 
 
 def _pool_panel() -> pd.DataFrame:
@@ -219,6 +231,10 @@ def build_indicators() -> pd.DataFrame:
         if limit:
             df[col] = df[col].ffill(limit=limit)
     df = df.reindex(trading)
+    if not idx.empty and len(trading):
+        # 只保留已完成交易日: 北京时间 15:30 前抓到当天的指数日线是盘中未完成值,
+        # 若把它当成收盘数据会导致快照 cutoff 提前一天、指标失真(如 MA60 掉值)。
+        df = df.loc[: _completed_session(trading)]
 
     # 增减持是流量: 无公告的交易日保持缺失, 不做 0 填充。
     # 这样「当月无公告(无数据)」与「当月有公告但增持=减持(净额为零)」在聚合时才可区分。
