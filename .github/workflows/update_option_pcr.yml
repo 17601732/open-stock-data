@@ -59,4 +59,4 @@ jobs:
           git config --global user.email 'action@github.com'
           git add option_pcr_50etf.csv data/radar/option_pcr_etf.csv
           # 有变化才提交，没变化跳过，避免空提交报错
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update option PCR data" && git pull --rebase origin main && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update option PCR data" && git pull --rebase --autostash origin main && git push)
