@@ -212,8 +212,9 @@ def fetch_pool_symbols() -> pd.DataFrame:
         }))
     pool = pd.concat(frames).drop_duplicates("code").reset_index(drop=True)
     store.write_frame("pool.csv", pool)
-    store.update_status("pool", status="ok", count=len(pool),
-                        start=str(pd.Timestamp.now().date()))
+    snap_date = str(pd.Timestamp.now().date())
+    store.update_status("pool", status="ok", count=len(pool), start=snap_date, end=snap_date,
+                        note="当前成分股名单快照(非时间序列), 全历史按此固定池回算")
     logger.info("样本池 %d 只(沪深300+中证500)", len(pool))
     return pool
 
@@ -375,9 +376,56 @@ def _fetch_pcr_one(date: str) -> list[dict]:
     return out
 
 
+def _pcr_to_long(df: pd.DataFrame) -> pd.DataFrame:
+    """把宽表 PCR 历史还原成长表(date/underlying/put_vol/call_vol)。
+
+    旧版本落盘的是宽表(put_vol_510050 等), 新抓的是长表; 若直接按 underlying
+    pivot, 宽表行会落进 NaN 分组并在重算 put_vol 时被清空, 导致 PCR 历史凭空断档。
+    """
+    cols = ["date", "underlying", "put_vol", "call_vol"]
+    if "underlying" in df.columns:
+        return df.reindex(columns=cols).copy()
+    pieces = []
+    for u in ("510050", "510300"):
+        pc, cc = f"put_vol_{u}", f"call_vol_{u}"
+        if pc in df.columns and cc in df.columns:
+            pieces.append(pd.DataFrame({
+                "date": df["date"], "underlying": u, "put_vol": df[pc], "call_vol": df[cc]}))
+    return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame(columns=cols)
+
+
+def _pcr_wide(long: pd.DataFrame) -> pd.DataFrame:
+    """长表 → 宽表(含 pcr 与分 ETF 列), 宽表是唯一落盘格式。"""
+    cols = ["put_vol_510050", "call_vol_510050", "put_vol_510300", "call_vol_510300"]
+    out = ["date", *cols, "put_vol", "call_vol", "pcr", "pcr_510050", "pcr_510300"]
+    if long.empty:
+        return pd.DataFrame(columns=out)
+    long = long.drop_duplicates(["date", "underlying"], keep="last")
+    wide = long.pivot(index="date", columns="underlying", values=["put_vol", "call_vol"])
+    wide.columns = [f"{c[0]}_{c[1]}" for c in wide.columns]
+    wide = wide.reset_index()
+    for c in cols:
+        if c not in wide.columns:
+            wide[c] = float("nan")
+    wide["put_vol"] = wide[["put_vol_510050", "put_vol_510300"]].sum(axis=1, min_count=1)
+    wide["call_vol"] = wide[["call_vol_510050", "call_vol_510300"]].sum(axis=1, min_count=1)
+    wide["pcr"] = wide["put_vol"] / wide["call_vol"]
+    wide["pcr_510050"] = wide["put_vol_510050"] / wide["call_vol_510050"]
+    wide["pcr_510300"] = wide["put_vol_510300"] / wide["call_vol_510300"]
+    return wide.drop_duplicates("date").sort_values("date").round(4)
+
+
 def fetch_option_pcr(full: bool = False, workers: int = 4) -> pd.DataFrame:
     """抓取 50ETF/300ETF 期权认购认沽成交量, 计算 PCR; 只保留真实可得区间。"""
-    existing = store.read_frame("option_pcr_etf.csv")
+    raw = store.read_frame("option_pcr_etf.csv")
+    existing = _pcr_wide(_pcr_to_long(raw)) if not raw.empty else raw
+    if not raw.empty:
+        # 自愈: 历史落盘可能只有分 ETF 成交量而 pcr 为空(旧版宽长表混用导致), 这里按成交量重算
+        raw_na = int(raw["pcr"].isna().sum()) if "pcr" in raw.columns else len(raw)
+        fixed_na = int(existing["pcr"].isna().sum())
+        if fixed_na < raw_na:
+            store.write_frame("option_pcr_etf.csv", existing)
+            logger.warning("修复历史 PCR 落盘断档: 恢复 %d 个日期", raw_na - fixed_na)
     idx = store.read_frame("index_daily.parquet")
     if idx.empty:
         logger.error("缺少指数日线, 无法确定交易日; 请先抓指数")
@@ -408,20 +456,11 @@ def fetch_option_pcr(full: bool = False, workers: int = 4) -> pd.DataFrame:
 
     if rows:
         new = pd.DataFrame(rows)
-        merged = pd.concat([existing, new], ignore_index=True) if not existing.empty else new
-        merged = merged.drop_duplicates(["date", "underlying"], keep="last").sort_values(["date", "underlying"])
-        wide = merged.pivot(index="date", columns="underlying", values=["put_vol", "call_vol"])
-        wide.columns = [f"{c[0]}_{c[1]}" for c in wide.columns]
-        wide = wide.reset_index()
-        for col in ("put_vol_510050", "call_vol_510050", "put_vol_510300", "call_vol_510300"):
-            if col not in wide.columns:
-                wide[col] = float("nan")
-        wide["put_vol"] = wide[["put_vol_510050", "put_vol_510300"]].sum(axis=1, min_count=1)
-        wide["call_vol"] = wide[["call_vol_510050", "call_vol_510300"]].sum(axis=1, min_count=1)
-        wide["pcr"] = wide["put_vol"] / wide["call_vol"]
-        wide["pcr_510050"] = wide["put_vol_510050"] / wide["call_vol_510050"]
-        wide["pcr_510300"] = wide["put_vol_510300"] / wide["call_vol_510300"]
-        wide = wide.drop_duplicates("date").sort_values("date").round(4)
+        # 宽表/长表统一成长表后再合并, 否则同日期的宽表行会在 pivot 中丢失
+        wide = _pcr_wide(pd.concat([_pcr_to_long(existing), new], ignore_index=True))
+        gaps = int(wide["pcr"].isna().sum())
+        if gaps:
+            logger.warning("PCR 合并后仍有 %d 个日期缺少 pcr(仅保留原始成交量列)", gaps)
         store.write_frame("option_pcr_etf.csv", wide)
         store.update_status("option_pcr", status="ok", start=str(wide.date.min()), end=str(wide.date.max()),
                             coverage_days=len(wide), note="仅保留实际可得区间, 无前向填充")
