@@ -122,7 +122,7 @@ Indicator coverage and update limits:
 |-----------|--------|----------------------|
 | Valuation (HS300 PE/PB, all-A PE, ERP) | Legulegu | HS300 PE/PB monthly, forward-filled to daily; all-A PB has no public API and is excluded |
 | Sentiment (turnover, amount/float-cap, limit net, margin ratio) | Sample pool + SSE/SZSE margin | Pool = 800 current constituents of HS300+CSI500 (survivorship bias) |
-| Breadth (advancers 5d, above MA60, 52w high-low) | Full market via TDX `hsjday.zip` | 2014-01-02 onward, ~5,500 active stocks; per-stock API only as fallback |
+| Breadth (advancers 5d, above MA60, 52w high-low) | Full market via TDX `hsjday.zip` | 2014-01-02 onward; 5,216 HS A-shares traded on 2026-11-02; per-stock API only as fallback |
 | TRIN | TDX full-market breadth | Recomputed daily from the package; `trin_2020_now.csv` only as fallback |
 | PCR | SSE option daily stats (510050 + 510300) | Real range only, **2019-12-23** start, no forward fill |
 | Net holder increase | Eastmoney announcements | 2014 onward, weekly cumulative 20 weeks, unit = 10k shares |
@@ -159,19 +159,58 @@ Measured on a local run (Actions uses the same code path):
 | Item | Result |
 |------|--------|
 | Zip size / download | 525.7 MB / 22 s (cookie path) |
-| Parsed stock files | 5,918 (SH/SZ/BJ, strict code-prefix filter; 5,571 active) |
+| Package contents | 12,233 `.day` files; only 5,562 match the A-share whitelist (5,216 traded on 2026-11-02) |
 | Parse + aggregation | 124 s (numpy `frombuffer`, vectorized `bincount`) |
-| Total wall clock | 165 s (download → parquet write) |
-| Detail output | 3,927,371 rows × 5,684 codes (3 years), `tdx_stock.parquet` ≈ 82 MB |
+| Total wall clock | 209 s (download → parquet write, incl. ex-rights tagging) |
+| Detail output | 3,727,236 rows × 5,327 codes (3 years), `tdx_stock.parquet` ≈ 82 MB |
 | Breadth output | 3,118 sessions since 2014-01-02, `tdx_breadth.parquet` ≈ 261 KB |
+| BSE (separate) | 1,519 sessions / 354 traded on 2026-11-02, `tdx_bse_breadth.parquet` ≈ 111 KB |
 
-The zip stays in the Actions cache (24 h TTL, `.part` + Range resume) and is **never committed**;
-only the slim parquet aggregates (`tdx_breadth.parquet`, `board_members.parquet`) are committed.
-The job has `timeout-minutes: 45`, well above the measured 165 s; disk use peaks around 1.4 GB
-(zip + extracted members + parquet), under the runner limit.
+The job has `timeout-minutes: 45`, well above the measured 209 s; disk use peaks around 1.4 GB
+(zip + extracted members + parquet), under the runner limit. The zip stays in the Actions cache
+(24 h TTL, `.part` + HTTP Range resume) and is **never committed**; only the slim parquet
+aggregates are committed.
 
 OHLCV validation against the per-stock interface (20 symbols × 20 recent sessions = 400 records):
 open/high/low/close `max_abs_diff = 0.0`, volume/amount ratio = 1.0 on every record.
+
+Security-type inventory (a full scan of the package, 2026-11-02 traded counts):
+
+| Segment | Files | Traded 11-02 | Kept |
+|---------|-------|--------------|------|
+| sh 600/601/603/605 (main) | 1,846 | 1,699 | yes |
+| sh 688/689 (STAR) | 621 | 616 | yes |
+| sz 000/001/002/003 (main) | 1,641 | 1,491 | yes |
+| sz 300/301 (ChiNext) | 1,454 | 1,410 | yes |
+| sh 5xx / 11x / 12x / 000 / 900 | ~1,200 | — | no (fund/bond/index/B share) |
+| sz 15x/16x/11x/12x/399/200 | ~1,000 | — | no (fund/bond/index/B share) |
+| bj 43/83/87/88/92 | 1,519 | 354 | separate series, not in HS breadth |
+
+Breadth uses `symbol = market + code` (e.g. `sh600000`, `sz000001`) as the unique key, so the
+Shanghai index `sh000001` can never collide with Ping An Bank `sz000001`. Records with no price or
+zero volume are dropped; suspended names simply have no `.day` record for that day.
+
+Hard checks are written into `meta.tdx.checks`: `sum_matches_total` (every day), latest day
+4,369 up / 763 down / 84 flat = **5,216** (expected band 5,100–5,500), annual median totals
+2014 ≈ 2,317, 2019 ≈ 3,608, 2021 ≈ 4,366, 2026 ≈ 5,189, max 5,218 (no 8,000+ peaks).
+The 5,300–5,400 reference range in the requirement is the *listed* universe including BSE
+(~350 names); within the Shanghai/Shenzhen whitelist, 5,222 codes were active in the last month
+and 5,216 traded on 2026-11-02 (6 suspended). Sample-pool diff: `000831` was suspended on 11-02,
+and `302132` is excluded by the requested whitelist (302 is not in 000/001/002/003/300/301).
+
+TRIN after the fix: 2026-10-30 raw 0.6025 / MA30 0.8759; 2026-11-02 raw 1.6775 / MA30 0.9160.
+The previously shown 1.3525 / 0.8911 were 24% / 2.8% too low because the polluted universe inflated
+both up/down counts and up/down volume, diluting the ratio.
+
+Score attribution (33.6 → 46.6): raw weighted score rose 41.65 → 45.43, then the 10-year calibration
+mapped it to 46.6. Per-indicator contribution changes: `turnover` +6.46 (it was **unscored** in the
+33.6 snapshot because the float-cap lookup failed), `trin_30d` +0.23, `adv_pct_5d` +0.01,
+`amount_floatcap` −0.02, `margin_ratio` −0.10; the other 12 scored indicators were unchanged.
+So the breadth correction itself contributed only +0.12 weighted points — the jump came from
+restoring turnover, with calibration amplifying the +3.78 raw move into +13.0 calibrated points.
+Event-study signals moved with it (10 dates dropped, 9 added, e.g. 2021-02-02 top → 2021-02-09 top):
+top 20/60/120d down-rate 46.7/60.0/60.0% (was 50.0/62.5/56.2), bottom up-rate 39.1/56.5/47.8%
+(was 47.8/52.2/47.8).
 
 **Adjustment (复权) handling:** `.day` prices are unadjusted. Same-day shape metrics (upper shadow,
 amplitude, volume spike) are unaffected. Cross-day returns / moving averages / N-day cumulative
@@ -196,25 +235,36 @@ Parameters (all configurable; defaults in `scripts/radar/pattern_signal.py`):
 - Optional position filter: within 5% of the 60-day high, or up-then-reverse close (off by default).
 - Board trigger: ≥3 hits **or** ≥10% of the board's eligible stocks on the same session.
 
-Board membership: Shenwan level-1 industry (31 boards, 4,897 codes, 87.8% of active stocks;
-Beijing exchange not covered). Concept/theme membership has no clean point-in-time source, so it is
+Board membership: Shenwan level-1 industry (31 boards, 4,897 codes, 93.8% of the 5,216 traded
+stocks; Beijing exchange not covered). Concept/theme membership has no clean point-in-time source, so it is
 **not** provided rather than fabricating a mapping. Membership is a current snapshot, not history.
 
-Effectiveness (2023-11-02 → 2026-11-02, 3,643 board signals, excess vs HS300):
+Effectiveness (2023-11-02 → 2026-11-02, 3,640 board signals, excess vs HS300):
 
 | Group | Window | n | Mean | Down share | Max DD | Excess |
 |-------|--------|---|------|------------|--------|--------|
-| Signal | 5d | 3,615 | +0.34% | 46.7% | -2.58% | +0.09% |
-| Signal | 10d | 3,589 | +0.72% | 45.5% | -4.76% | +0.23% |
-| Signal | 20d | 3,562 | +1.59% | 44.4% | -7.71% | +0.56% |
-| Volume only | 5d | 16,472 | +0.24% | 48.0% | -2.44% | +0.07% |
-| Shadow only | 5d | 19,407 | +0.21% | 47.4% | -2.30% | +0.12% |
+| Signal | 5d | 3,612 | +0.34% | 46.7% | -2.58% | +0.09% |
+| Signal | 10d | 3,586 | +0.72% | 45.6% | -4.76% | +0.22% |
+| Signal | 20d | 3,559 | +1.59% | 44.5% | -7.72% | +0.56% |
+| Volume only | 5d | 16,469 | +0.24% | 48.0% | -2.44% | +0.07% |
+| Volume only | 10d | 16,396 | +0.49% | 46.9% | -4.54% | +0.15% |
+| Volume only | 20d | 16,264 | +1.05% | 45.9% | -7.45% | +0.34% |
+| Shadow only | 5d | 19,405 | +0.21% | 47.4% | -2.30% | +0.12% |
+| Shadow only | 10d | 19,319 | +0.45% | 47.0% | -4.31% | +0.24% |
+| Shadow only | 20d | 19,171 | +0.81% | 46.4% | -7.17% | +0.37% |
 | All board-days | 5d | 22,413 | +0.22% | 47.6% | -2.34% | +0.11% |
+| All board-days | 10d | 22,320 | +0.44% | 46.9% | -4.37% | +0.22% |
+| All board-days | 20d | 22,134 | +0.91% | 46.2% | -7.16% | +0.41% |
 
 The pattern has **no significant downside predictive power**: forward returns are slightly higher
-than the all-board-day baseline, win rates slightly lower, and excess return nearly identical.
-It is therefore presented as an attention/risk-review prompt, not a bearish alarm, and should be
-down-weighted in any scoring use. The App exposes the volume multiple and board-count thresholds.
+than the all-board-day baseline (20d +1.59% vs +0.91%), down-rate slightly lower (44.5% vs 46.2%),
+and excess return nearly identical (+0.56% vs +0.41%, i.e. only +0.15pp). Welch t on 20d returns
+(signal vs all board-days) is 3.85 (p<0.001) — statistically distinguishable only because n=3,559;
+the economic edge is negligible. It is therefore presented as an attention/risk-review prompt,
+not a bearish alarm, and is **not** wired into the composite score. Threshold tests: `hits≥5`
+gives n=1,457, 20d +2.21%, excess +0.85%, down-rate 43.2%; raising the volume multiple to 2.5×
+weakens it (+1.34%). Recommended default stays 3 names/10%, with `hits≥5` for a shorter watchlist.
+The App exposes the volume multiple and board-count thresholds.
 
 ## Development
 

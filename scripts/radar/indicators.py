@@ -80,7 +80,8 @@ def trin_source_info() -> dict:
     """
     brd = store.read_frame("tdx_breadth.parquet")
     idx = store.read_frame("index_daily.parquet")
-    if not brd.empty:
+    tdx_ok = store.read_status().get("tdx", {}).get("status") == "ok"
+    if not brd.empty and tdx_ok:
         bdates = sorted(str(d)[:10] for d in brd["date"])
         info: dict = {
             "key": "trin_raw",
@@ -93,7 +94,8 @@ def trin_source_info() -> dict:
             cal = sorted({str(d)[:10] for d in pd.to_datetime(idx.loc[idx.code == "000300", "date"])})
             cal = [d for d in cal if pd.Timestamp(d) <= _completed_session(pd.DatetimeIndex(cal))]
             have = set(bdates)
-            missing = [d for d in cal if bdates[0] <= d <= cal[-1] and d not in have]
+            # 只检查到包内最后一个交易日为止; 包尚未更新的次日不算缺口
+            missing = [d for d in cal if bdates[0] <= d <= bdates[-1] and d not in have]
             info["missing_dates"] = missing
             info["status"] = "partial" if missing else "ok"
             info["missing_reason"] = "上游包未包含该交易日" if missing else None
@@ -150,8 +152,12 @@ def build_indicators() -> pd.DataFrame:
         out["cn10y"] = bond.set_index("date")["cn10y"].sort_index()
 
     # 全市场涨跌家数/上涨量/下跌量: 优先用 TDX 全量包产物(2014 起, 无需逐只接口)
+    # 只有 TDX 本次状态为 ok 才接入, 避免解析失败时静默复用旧缓存
     brd = store.read_frame("tdx_breadth.parquet")
-    tdx_breadth = not brd.empty
+    tdx_status = store.read_status().get("tdx", {})
+    tdx_breadth = not brd.empty and tdx_status.get("status") == "ok"
+    if brd.empty and tdx_status.get("status") == "ok":
+        logger.warning("TDX 状态 ok 但 tdx_breadth 缺失, 回退样本池/旧 TRIN 口径")
     if tdx_breadth:
         b = brd.set_index(pd.to_datetime(brd["date"])).sort_index()
         out["adv_pct_5d"] = b["adv_pct"].rolling(5, min_periods=3).mean()

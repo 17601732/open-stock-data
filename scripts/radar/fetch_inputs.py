@@ -237,6 +237,60 @@ def _fetch_one_stock(code: str, start: str) -> pd.DataFrame:
     return d
 
 
+def _float_caps(codes: list[str] | None = None) -> pd.Series:
+    """当前流通市值(元): 东财现货快照 → 新浪快照 → 逐只个股资料; 缓存 3 天。"""
+    cached = store.read_frame("float_caps.parquet")
+    if not cached.empty and "fetched_at" in cached.columns and len(cached) >= 500:
+        ts = pd.to_datetime(cached["fetched_at"].iloc[0], errors="coerce")
+        if pd.notna(ts) and (datetime.now() - ts.to_pydatetime()).days < 3:
+            return cached.set_index("code")["float_cap"]
+    d = None
+    try:
+        d = ak.stock_zh_a_spot_em()[["代码", "流通市值"]].dropna()
+    except Exception as exc:
+        logger.warning("东财流通市值快照失败(%s), 改用新浪快照", str(exc)[:80])
+        try:
+            d = ak.stock_zh_a_spot()[["代码", "流通市值"]].dropna()
+        except Exception as exc2:
+            logger.warning("新浪流通市值快照失败(%s), 改用逐只个股资料", str(exc2)[:80])
+    out = pd.DataFrame()
+    if d is not None:
+        out = pd.DataFrame({
+            "code": d["代码"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(6),
+            "float_cap": pd.to_numeric(d["流通市值"], errors="coerce"),
+            "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }).dropna(subset=["float_cap"])
+    if out.empty and codes:
+        # 逐只兜底: stock_individual_info_em 的「流通市值」, 只对样本池 800 只调用
+        rows: list[dict] = []
+
+        def _one(c: str) -> dict | None:
+            try:
+                info = ak.stock_individual_info_em(symbol=c)
+                cap = float(info.loc[info["item"] == "流通市值", "value"].iloc[0])
+                return {"code": c, "float_cap": cap}
+            except Exception:
+                return None
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            for r in ex.map(_one, codes):
+                if r and r["float_cap"] > 0:
+                    rows.append(r)
+        if rows:
+            out = pd.DataFrame(rows)
+            out["fetched_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            logger.info("逐只流通市值兜底: %d/%d 只", len(out), len(codes))
+    if out.empty:
+        return pd.Series(dtype=float)
+    out = out[out["float_cap"] > 0].drop_duplicates("code", keep="last")
+    # 覆盖率不足时不落盘, 避免残缺快照在缓存里留存 3 天
+    if len(out) < max(500, int(0.8 * len(codes or []))):
+        logger.warning("流通市值覆盖不足(%d 只), 不缓存, 回退旧行推算", len(out))
+        return pd.Series(dtype=float)
+    store.write_frame("float_caps.parquet", out)
+    return out.set_index("code")["float_cap"]
+
+
 def _stocks_from_tdx(pool: pd.DataFrame) -> pd.DataFrame:
     """把 TDX 全市场个股明细裁剪成样本池行, 并换算成 stock_daily 口径。
 
@@ -246,21 +300,35 @@ def _stocks_from_tdx(pool: pd.DataFrame) -> pd.DataFrame:
     tdx = store.read_frame("tdx_stock.parquet")
     old = store.read_frame("stock_daily.parquet")
     if not old.empty:
+        old["code"] = old["code"].astype(str).str.zfill(6)
         # 清掉历史上误写入的非 ISO 日期行(TDX YYYYMMDD), 避免增量库里两种日期格式混存
         iso = old["date"].astype(str).str.match(r"^\d{4}-\d{2}-\d{2}$")
         if not iso.all():
             old = old[iso].copy()
             store.write_frame("stock_daily.parquet", old)
             logger.warning("stock_daily 清理了 %d 行非标准日期", int((~iso).sum()))
-    caps: dict[str, float] = {}
-    if not old.empty and "turnover" in old.columns:
-        last = old.sort_values("date").groupby("code").tail(1)
-        cap = last["amount"] / (pd.to_numeric(last["turnover"], errors="coerce") / 100.0)
-        caps = cap.replace([np.inf, -np.inf], np.nan).dropna().to_dict()
     sub = tdx[tdx["code"].isin(set(pool["code"]))].copy()
     if sub.empty:
         return pd.DataFrame(columns=store.STOCK_SCHEMA)
-    cap = sub["code"].map(caps)
+    # 流通股本: 优先用东财现货快照的当前流通市值折算; 缺失代码才回退旧行反推
+    latest_close = sub.sort_values("date").groupby("code")["close"].last()
+    fc = _float_caps(sorted(sub["code"].unique().tolist()))
+    shares = pd.Series(dtype=float)
+    if len(fc):
+        shares = (fc / latest_close.reindex(fc.index).replace(0, np.nan)).dropna()
+    missing = set(sub["code"]) - set(shares.index)
+    if missing and not old.empty and "turnover" in old.columns:
+        # 只用 TDX 明细起点之前的 API 行反推股本: 近 3 年行已被 TDX 覆盖(可能缺换手率),
+        # 再按最新收盘价折算, 避免把旧市值原样带到今天
+        old_valid = old[pd.to_numeric(old["turnover"], errors="coerce").notna()].copy()
+        old_valid["turnover"] = pd.to_numeric(old_valid["turnover"], errors="coerce")
+        cutoff_iso = pd.to_datetime(str(tdx["date"].min()), format="%Y%m%d").strftime("%Y-%m-%d")
+        base = old_valid[(old_valid["date"] < cutoff_iso) & old_valid["code"].isin(missing)]
+        last = base.sort_values("date").groupby("code").tail(1).set_index("code")
+        cap_old = last["amount"] / (last["turnover"] / 100.0)
+        est = (cap_old / last["close"].replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+        shares = pd.concat([shares, est.dropna()])
+    cap_row = sub["code"].map(shares) * sub["close"].astype(float)
     out = pd.DataFrame({
         "code": sub["code"],
         "date": pd.to_datetime(sub["date"].astype(str), format="%Y%m%d").dt.strftime("%Y-%m-%d"),
@@ -268,7 +336,7 @@ def _stocks_from_tdx(pool: pd.DataFrame) -> pd.DataFrame:
         "pct_chg": (sub["close"] / sub["prev_close"].replace(0, np.nan) - 1.0) * 100.0,
         "volume": sub["volume"].astype(float),
         "amount": sub["amount"].astype(float),
-        "turnover": (sub["amount"] / cap.replace(0, np.nan)) * 100.0,
+        "turnover": (sub["amount"] / cap_row.replace(0, np.nan)) * 100.0,
     })
     return out.dropna(subset=["close"])
 
@@ -281,15 +349,16 @@ def fetch_stock_daily(full: bool = False, workers: int = 8, limit: int | None = 
     pool["code"] = pool["code"].astype(str).str.zfill(6)
 
     tdx = store.read_frame("tdx_stock.parquet")
+    tdx_ok = store.read_status().get("tdx", {}).get("status") == "ok"
     source = "api"
-    if not tdx.empty:
-        latest = str(tdx["date"].max())[:10]
+    if not tdx.empty and tdx_ok:
+        latest = pd.to_datetime(tdx["date"].max(), format="%Y%m%d").strftime("%Y-%m-%d")
         idx_last = ""
         idx = store.read_frame("index_daily.parquet")
         if not idx.empty:
             idx_last = str(idx["date"].max())[:10]
         # 包内最新交易日落后指数 5 个自然日以上视为过期, 走接口兜底
-        fresh = not idx_last or latest >= str(pd.Timestamp(idx_last) - pd.Timedelta(days=5))[:10]
+        fresh = tdx_ok and (not idx_last or latest >= str(pd.Timestamp(idx_last) - pd.Timedelta(days=5))[:10])
         if fresh:
             derived = _stocks_from_tdx(pool)
             missing = set(pool["code"]) - set(derived["code"].unique())
@@ -302,7 +371,7 @@ def fetch_stock_daily(full: bool = False, workers: int = 8, limit: int | None = 
                                     missing_codes=sorted(missing)[:10],
                                     missing_count=len(missing),
                                     start=str(derived["date"].min()), end=latest,
-                                    note="TDX 全量包解析; 换手率由最近已知流通市值换算; 接口仅作兜底")
+                                    note="TDX 全量包解析; 换手率由当前流通市值(现货快照优先)换算; 接口仅作兜底")
                 logger.info("个股日线来源 TDX: %d 行, 缺 %d 只", len(derived), len(missing))
                 if not missing:
                     return store.read_frame("stock_daily.parquet")

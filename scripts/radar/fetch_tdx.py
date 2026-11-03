@@ -53,6 +53,7 @@ TDX_HEADERS = {
 }
 MIN_ZIP_BYTES = 450 * 1024 * 1024
 DETAIL_YEARS = 3           # 个股明细保留近 3 年(形态回测需要足够的跨期样本)
+PARSE_VERSION = 4          # 解析口径版本: 证券类型白名单/volume 过滤/市场前缀主键变更时递增
 
 DAY_DTYPE = np.dtype([
     ("date", "<i4"), ("open", "<i4"), ("high", "<i4"), ("low", "<i4"),
@@ -129,21 +130,36 @@ def ensure_zip(force: bool = False) -> Path:
 
 
 # ---------------------------------------------------------------- 解析
-def _is_stock(market: str, code: str) -> bool:
-    """只保留 A 股个股, 排除指数/ETF/债券/B股/板块指数。
+# 证券类型白名单: 只保留沪深 A 股。其余(指数/ETF/LOF/REITs/债券/可转债/B 股/板块指数)
+# 一律排除 —— 实测包内共 12,233 个 .day, 若只按「排除指数」会多算约 3,100 个非股票品种。
+STOCK_BOARDS: dict[str, tuple[str, ...]] = {
+    "sh": ("600", "601", "603", "605", "688", "689"),   # 沪主板 + 科创板
+    "sz": ("000", "001", "002", "003", "300", "301"),   # 深主板 + 创业板
+}
+BSE_PREFIXES = ("43", "83", "87", "88", "92")
 
-    sh/lday 里混有 5xxxxx(ETF)、11x/12x(债券)、000/880(指数); sz 里有 159xxx(ETF)、
-    12x(债券)、200(B股)、399(指数)。若不剔除, 涨跌家数与成交额都会被污染。
-    """
+
+def _stock_class(market: str, code: str) -> str | None:
+    """返回证券类型: sh_main/sh_kcb/sz_main/sz_gem/bse, 非 A 股返回 None。"""
     if market == "sh":
-        return code.startswith(("600", "601", "603", "605", "688", "689"))
+        if code.startswith(("600", "601", "603", "605")):
+            return "sh_main"
+        if code.startswith(("688", "689")):
+            return "sh_kcb"
+        return None
     if market == "sz":
-        return code.startswith(("000", "001", "002", "003", "300", "301", "302"))
-    return code.startswith(("43", "83", "87", "88", "92")) and not code.startswith("899")
+        if code.startswith(("000", "001", "002", "003")):
+            return "sz_main"
+        if code.startswith(("300", "301")):
+            return "sz_gem"
+        return None
+    if market == "bj" and code.startswith(BSE_PREFIXES) and not code.startswith("899"):
+        return "bse"
+    return None
 
 
-def _parse_members(zip_path: Path) -> list[tuple[str, str, str]]:
-    """列出包内个股 .day 文件: (market, stem, code), stem 形如 sh600000。"""
+def _parse_members(zip_path: Path) -> list[tuple[str, str, str, str]]:
+    """列出包内 A 股 .day 文件: (market, stem, code, board), stem 形如 sh600000。"""
     with zipfile.ZipFile(zip_path) as zf:
         out = []
         for name in zf.namelist():
@@ -154,9 +170,12 @@ def _parse_members(zip_path: Path) -> list[tuple[str, str, str]]:
             if market not in ("sh", "sz", "bj") or len(stem) < 7:
                 continue
             code = stem[2:]
-            if not code.isdigit() or not _is_stock(market, code):
+            if not code.isdigit():
                 continue
-            out.append((market, stem, code))
+            board = _stock_class(market, code)
+            if board is None:
+                continue
+            out.append((market, stem, code, board))
         return out
 
 
@@ -169,11 +188,12 @@ def _read_day(zf: zipfile.ZipFile, name: str) -> np.ndarray:
     return np.frombuffer(raw[: n * RECORD_BYTES], dtype=DAY_DTYPE)
 
 
-def parse_zip(zip_path: Path, detail_cutoff: int | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """解析全量包, 返回 (breadth, stock_detail)。
+def parse_zip(zip_path: Path, detail_cutoff: int | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """解析全量包, 返回 (breadth, stock_detail, bse_breadth)。
 
-    breadth 按日聚合全市场(2014 起): 上涨/下跌/平盘家数, 上涨量/下跌量, 成交额合计。
-    stock_detail 只保留最近 DETAIL_DAYS 个交易日, 供形态/板块计算。
+    breadth 只统计沪深 A 股(2014 起): 上涨/下跌/平盘家数, 上涨量/下跌量, 成交额合计。
+    北交所单列返回, 不并入沪深口径(北交所 2021 年才开市, 混入会造成历史序列断层)。
+    stock_detail 只保留沪深 A 股最近 DETAIL_YEARS 年, 主键为 market+code(symbol)。
     """
     start = _history_start_num()
     # 抽样 40 个文件取最新交易日, 据此确定明细截断点(全量扫描会多花一倍解压时间)
@@ -182,33 +202,43 @@ def parse_zip(zip_path: Path, detail_cutoff: int | None = None) -> tuple[pd.Data
     members = _parse_members(zip_path)
     step = max(len(members) // 40, 1)
     latest = 0
-    for market, stem, _code in members[::step]:
+    for market, stem, _code, _board in members[::step]:
         a = _read_day(zf, f"{market}/lday/{stem}.day")
         if len(a):
             latest = max(latest, int(a["date"][-1]))
     latest = latest or int(datetime.now().strftime("%Y%m%d"))
     cutoff = detail_cutoff or int(
         (pd.Timestamp(str(latest)) - pd.DateOffset(years=DETAIL_YEARS)).strftime("%Y%m%d"))
-    logger.info("TDX 包内个股文件 %d 个, 最新交易日 %d, 明细截断 %d (扫描 %.0fs)",
+    logger.info("TDX 包内 A 股文件 %d 个, 最新交易日 %d, 明细截断 %d (扫描 %.0fs)",
                 len(members), latest, cutoff, time.time() - t_scan)
 
     # 逐日聚合容器: date -> [up, down, flat, up_vol, down_vol, amount, up_amt, down_amt]
     acc: dict[int, list[float]] = {}
+    acc_bse: dict[int, list[float]] = {}
     detail_parts: list[pd.DataFrame] = []
     t0 = time.time()
-    for i, (market, stem, code) in enumerate(members, 1):
+    for i, (market, stem, code, board) in enumerate(members, 1):
         a = _read_day(zf, f"{market}/lday/{stem}.day")
-        if len(a) < 2:
-            continue
-        a = a[(a["date"] >= start) & (a["date"] <= 99999999)]
         if len(a) < 2:
             continue
         # 记录内 date 若未排序, 按 date 排序保证 prev_close 正确
         if np.any(np.diff(a["date"]) < 0):
             a = a[np.argsort(a["date"])]
+        # 只保留有价且有成交的记录: 停牌/无价格占位行不计入分母
+        price_ok = (a["open"] > 0) & (a["high"] > 0) & (a["low"] > 0) & (a["close"] > 0)
+        vol_all = a["volume"].astype(np.float64)
+        a = a[price_ok & (vol_all > 0)]
+        if len(a) < 2:
+            continue
         close = a["close"].astype(np.float64) / 100.0
         prev = np.concatenate([[np.nan], close[:-1]])
         chg = close / prev - 1.0
+        # 先算涨跌幅再截断: 首个保留日(2014-01-02)需要前一交易日收盘价,
+        # 否则其 prev_close 恒为 NaN, 那天会退化成 0/0/0
+        keep_start = a["date"] >= start
+        if keep_start.sum() < 2:
+            continue
+        a, close, prev, chg = a[keep_start], close[keep_start], prev[keep_start], chg[keep_start]
         vol = a["volume"].astype(np.float64)
         amt = a["amount"].astype(np.float64)
         up = (chg > 0.0005) & np.isfinite(chg)
@@ -228,16 +258,21 @@ def parse_zip(zip_path: Path, detail_cutoff: int | None = None) -> tuple[pd.Data
             np.bincount(inv, weights=np.where(up, amt, 0.0), minlength=n),
             np.bincount(inv, weights=np.where(dn, amt, 0.0), minlength=n),
         )
+        target = acc_bse if board == "bse" else acc
         for j, d in enumerate(udates):
-            row = acc.setdefault(int(d), [0.0] * 8)
+            row = target.setdefault(int(d), [0.0] * 8)
             for k in range(8):
                 row[k] += float(fields[k][j])
 
+        if board == "bse":
+            continue
         keep = dates >= cutoff
         if keep.sum() >= 2:
             detail_parts.append(pd.DataFrame({
-                "code": code,
+                "symbol": f"{market}{code}",
                 "market": market,
+                "code": code,
+                "sec_type": board,
                 "date": dates[keep].astype("U8"),
                 "open": a["open"][keep].astype(np.float64) / 100.0,
                 "high": a["high"][keep].astype(np.float64) / 100.0,
@@ -251,20 +286,72 @@ def parse_zip(zip_path: Path, detail_cutoff: int | None = None) -> tuple[pd.Data
             logger.info("解析进度 %d/%d (%.0fs)", i, len(members), time.time() - t0)
     zf.close()
 
-    breadth = pd.DataFrame(
-        [(d, *v) for d, v in sorted(acc.items())],
-        columns=["date", "up", "down", "flat", "up_vol", "down_vol",
-                 "amount", "up_amt", "down_amt"],
-    )
-    breadth["date"] = pd.to_datetime(breadth["date"].astype(str)).dt.strftime("%Y-%m-%d")
-    breadth["total"] = breadth["up"] + breadth["down"] + breadth["flat"]
-    breadth["adv_pct"] = breadth["up"] / breadth["total"].replace(0, np.nan)
-    breadth["trin_raw"] = (breadth["up"] / breadth["down"].replace(0, np.nan)) / (
-        breadth["up_vol"] / breadth["down_vol"].replace(0, np.nan))
+    breadth = _agg_frame(acc)
+    bse_breadth = _agg_frame(acc_bse)
     stock = pd.concat(detail_parts, ignore_index=True) if detail_parts else pd.DataFrame()
-    logger.info("解析完成 %.0fs: breadth %d 行, 个股明细 %d 行",
-                time.time() - t0, len(breadth), len(stock))
-    return breadth, stock
+    logger.info("解析完成 %.0fs: 沪深A股 breadth %d 行, 北交所 %d 行, 个股明细 %d 行",
+                time.time() - t0, len(breadth), len(bse_breadth), len(stock))
+    return breadth, stock, bse_breadth
+
+
+def _agg_frame(acc: dict[int, list[float]]) -> pd.DataFrame:
+    """把逐日累加容器转成 breadth 表, 并保证 up+down+flat==total。"""
+    cols = ["date", "up", "down", "flat", "up_vol", "down_vol",
+            "amount", "up_amt", "down_amt"]
+    if not acc:
+        return pd.DataFrame(columns=[*cols, "total", "adv_pct", "trin_raw"])
+    df = pd.DataFrame([(d, *v) for d, v in sorted(acc.items())], columns=cols)
+    df["date"] = pd.to_datetime(df["date"].astype(str)).dt.strftime("%Y-%m-%d")
+    df["total"] = df["up"] + df["down"] + df["flat"]
+    df["adv_pct"] = df["up"] / df["total"].replace(0, np.nan)
+    df["trin_raw"] = (df["up"] / df["down"].replace(0, np.nan)) / (
+        df["up_vol"] / df["down_vol"].replace(0, np.nan))
+    return df
+
+
+def validate_breadth(breadth: pd.DataFrame, stock: pd.DataFrame | None = None,
+                     bse: pd.DataFrame | None = None) -> dict:
+    """宽度硬校验: 家数自洽 / 最新日量级 / 年度分布 / 峰值 / 与样本池集合比对。"""
+    if breadth.empty:
+        return {"ok": False, "reason": "breadth 为空"}
+    d = breadth.copy()
+    sum_ok = bool(((d["up"] + d["down"] + d["flat"]) == d["total"]).all())
+    latest = d.iloc[-1]
+    year = str(latest["date"])[:4]
+    annual = {}
+    for y in ("2014", "2019", "2021", year):
+        s = d[d["date"].astype(str).str[:4] == y]
+        if s.empty:
+            continue
+        annual[y] = {"days": len(s), "median_total": int(s["total"].median()),
+                     "max_total": int(s["total"].max()), "last_total": int(s["total"].iloc[-1])}
+    max_row = d.loc[d["total"].idxmax()]
+    pool = store.read_frame("pool.csv")
+    pool_not_in_tdx: list[str] = []
+    active_codes = 0
+    if stock is not None and not stock.empty:
+        last_num = str(latest["date"]).replace("-", "")
+        codes = set(stock.loc[stock["date"].astype(str) == last_num, "code"])
+        active_codes = len(codes)
+        if not pool.empty:
+            pool_not_in_tdx = sorted(set(pool["code"].astype(str).str.zfill(6)) - codes)[:10]
+    return {
+        "ok": sum_ok and bool(max_row["total"] < 6000),
+        "sum_matches_total": sum_ok,
+        "latest_date": str(latest["date"]),
+        "latest": {"up": int(latest["up"]), "down": int(latest["down"]),
+                   "flat": int(latest["flat"]), "total": int(latest["total"])},
+        # 口径为"当日有成交的沪深A股", 停牌股不计分母; 2026-11-02 实测 5,216
+        "expected_latest_range": [5100, 5500],
+        "within_expected_range": bool(5100 <= latest["total"] <= 5500),
+        "annual": annual,
+        "max_total": int(max_row["total"]), "max_total_date": str(max_row["date"]),
+        "peak_below_6000": bool(max_row["total"] < 6000),
+        "bse_days": len(bse) if bse is not None else 0,
+        "bse_latest_total": int(bse.iloc[-1]["total"]) if bse is not None and not bse.empty else 0,
+        "pool_codes": len(pool), "pool_not_in_tdx": pool_not_in_tdx,
+        "tdx_active_codes": active_codes,
+    }
 
 
 def detect_ex_rights(stock: pd.DataFrame, market_breadth: pd.DataFrame | None = None,
@@ -292,61 +379,78 @@ def detect_ex_rights(stock: pd.DataFrame, market_breadth: pd.DataFrame | None = 
 
 
 def fetch_tdx(force: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """下载并解析全量包, 落盘 breadth 与个股明细, 更新状态。"""
+    """下载并解析全量包, 落盘 breadth/个股明细/北交所序列, 更新状态。"""
     t0 = time.time()
     out_breadth = store.DATA_DIR / "tdx_breadth.parquet"
     out_stock = store.DATA_DIR / "tdx_stock.parquet"
     try:
         zp = ensure_zip(force)
-        # 解析产物比 zip 新 → 说明本次包已解析过, 直接复用(省 2-4 分钟)
-        if not force and out_breadth.exists() and out_stock.exists() \
-                and out_breadth.stat().st_mtime >= zp.stat().st_mtime \
-                and out_stock.stat().st_mtime >= zp.stat().st_mtime:
+        prev = store.read_status().get("tdx", {})
+        # 解析产物比 zip 新 + 口径版本一致 → 复用; 否则重解析(防旧缓存污染)
+        cached = (
+            not force and out_breadth.exists() and out_stock.exists()
+            and out_breadth.stat().st_mtime >= zp.stat().st_mtime
+            and out_stock.stat().st_mtime >= zp.stat().st_mtime
+        )
+        if cached:
             breadth = store.read_frame("tdx_breadth.parquet")
             stock = store.read_frame("tdx_stock.parquet")
-            # 除权日历更新过(或之前是启发式打的标)时, 重新打标
-            flags = store.read_status().get("ex_rights_flags", {})
-            cal = store.read_frame("ex_rights.parquet")
-            if not cal.empty and flags.get("flag_source") != "eastmoney_fhps":
-                from scripts.radar import exrights
+            bse = store.read_frame("tdx_bse_breadth.parquet")
+            checks = validate_breadth(breadth, stock, bse)
+            if prev.get("parse_version") == PARSE_VERSION and checks["ok"] \
+                    and "symbol" in stock.columns:
+                # 除权日历更新过(或之前是启发式打的标)时, 重新打标
+                flags = store.read_status().get("ex_rights_flags", {})
+                cal = store.read_frame("ex_rights.parquet")
+                if not cal.empty and flags.get("flag_source") != "eastmoney_fhps":
+                    from scripts.radar import exrights
 
-                stock = exrights.apply_flags(stock, breadth)
-                store.write_frame("tdx_stock.parquet", stock)
-                logger.info("已用东财除权日历重新打标: %d 行", int(stock["ex_rights"].sum()))
-            logger.info("复用已解析 TDX 产物 (%d 日 / %d 行)", len(breadth), len(stock))
-            prev = store.read_status().get("tdx", {})
-            parse_sec = prev.get("elapsed_sec") if prev.get("mode") == "parse" else None
-            store.update_status(
-                "tdx", status="ok", path="hsjday.zip", zip_mb=round(zp.stat().st_size / 1048576, 1),
-                mode="cached", breadth_days=len(breadth), stock_rows=len(stock),
-                stock_codes=int(stock["code"].nunique()),
-                start=str(breadth["date"].min()), end=str(breadth["date"].max()),
-                ex_rights_rows=int(stock["ex_rights"].sum()) if "ex_rights" in stock else 0,
-                elapsed_sec=parse_sec, cached_sec=round(time.time() - t0, 1),
-                note="复用已解析产物; .day 为不复权, 除权日按东财日历打标",
-            )
-            return breadth, stock
-        breadth, stock = parse_zip(zp)
+                    stock = exrights.apply_flags(stock, breadth)
+                    store.write_frame("tdx_stock.parquet", stock)
+                    logger.info("已用东财除权日历重新打标: %d 行", int(stock["ex_rights"].sum()))
+                logger.info("复用已解析 TDX 产物 (%d 日 / %d 行)", len(breadth), len(stock))
+                store.update_status(
+                    "tdx", status="ok", path="hsjday.zip",
+                    zip_mb=round(zp.stat().st_size / 1048576, 1),
+                    mode="cached", parse_version=PARSE_VERSION,
+                    breadth_days=len(breadth), stock_rows=len(stock),
+                    stock_codes=int(stock["symbol"].nunique()),
+                    start=str(breadth["date"].min()), end=str(breadth["date"].max()),
+                    ex_rights_rows=int(stock["ex_rights"].sum()) if "ex_rights" in stock else 0,
+                    elapsed_sec=prev.get("elapsed_sec"), cached_sec=round(time.time() - t0, 1),
+                    checks=checks, scope="沪深A股(不含北交所)",
+                    note="复用已解析产物; .day 为不复权, 除权日按东财日历打标",
+                )
+                return breadth, stock
+            logger.warning("缓存 TDX 产物未通过校验(version=%s), 重新解析",
+                           prev.get("parse_version"))
+
+        breadth, stock, bse = parse_zip(zp)
         if breadth.empty:
             raise ValueError("解析后 breadth 为空")
+        checks = validate_breadth(breadth, stock, bse)
+        if not checks["sum_matches_total"]:
+            raise ValueError(f"宽度自洽校验失败: {checks['latest']}")
         from scripts.radar import exrights
 
         stock = exrights.apply_flags(stock, breadth)
         store.write_frame("tdx_breadth.parquet", breadth)
         store.write_frame("tdx_stock.parquet", stock)
+        store.write_frame("tdx_bse_breadth.parquet", bse)
         store.update_status(
             "tdx", status="ok", path="hsjday.zip", zip_mb=round(zp.stat().st_size / 1048576, 1),
-            mode="parse",
+            mode="parse", parse_version=PARSE_VERSION,
             breadth_days=len(breadth), stock_rows=len(stock),
-            stock_codes=int(stock["code"].nunique()),
+            stock_codes=int(stock["symbol"].nunique()),
             start=str(breadth.date.min()), end=str(breadth.date.max()),
             ex_rights_rows=int(stock["ex_rights"].sum()),
             elapsed_sec=round(time.time() - t0, 1),
+            checks=checks, scope="沪深A股(不含北交所)",
             note=".day 为不复权; ex_rights 来自东财分红送配除权除息日(缺失时回退启发式), 跨期收益已排除跨除权样本",
         )
-        logger.info("TDX 完成 %.0fs: breadth %s~%s, 个股 %d 只/%d 行",
+        logger.info("TDX 完成 %.0fs: 沪深A股 %s~%s 最新 %s, 个股 %d 只/%d 行, 北交所单列 %d 日",
                     time.time() - t0, breadth.date.min(), breadth.date.max(),
-                    stock["code"].nunique(), len(stock))
+                    checks["latest"], stock["symbol"].nunique(), len(stock), len(bse))
         return breadth, stock
     except Exception as exc:
         store.update_status("tdx", status="failed", reason=str(exc)[:160])

@@ -82,13 +82,14 @@ def _gap_info(dates: list[str], reference: pd.Series | None) -> list[dict]:
 def _breadth_check(date: str) -> dict | None:
     """截止日涨跌家数一致性: 涨+跌+平必须等于有数据的样本数(优先全市场 TDX 口径)。"""
     brd = store.read_frame("tdx_breadth.parquet")
-    if not brd.empty:
+    if not brd.empty and store.read_status().get("tdx", {}).get("status") == "ok":
         row = brd[brd["date"].astype(str).str[:10] == date]
         if not row.empty:
             r = row.iloc[0]
             return {"date": date, "up": int(r["up"]), "down": int(r["down"]), "flat": int(r["flat"]),
-                    "total": int(r["total"]), "sum_matches_total": True,
-                    "scope": "全市场个股(TDX 全量包)"}
+                    "total": int(r["total"]),
+                    "sum_matches_total": bool(int(r["up"]) + int(r["down"]) + int(r["flat"]) == int(r["total"])),
+                    "scope": "沪深A股(TDX 全量包, 不含北交所)"}
     st = store.read_frame("stock_daily.parquet")
     if st.empty:
         return None
@@ -209,7 +210,7 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
     notes = [
         "交易日历以沪深300指数实际交易日为准; meta.gap_info 中 holiday=节假日正常休市, missing=真实缺失",
         "两融余额由交易所 T+1/T+2 发布, 截止日当日可能无值, 属正常发布滞后(不作为缺口); 前值填充窗口按指标配置",
-        "涨跌家数/成交额/TRIN 分母默认用通达信全量包(约5500只活跃个股); 涨跌停家数仍为样本池近似计数, 非全市场精确口径",
+        "涨跌家数/成交额/TRIN 分母默认用通达信全量包(沪深A股约5200只, 不含北交所); 涨跌停家数仍为样本池近似计数, 非全市场精确口径",
         "两融余额为沪深两市合计, 分母用样本池流通市值, 绝对水平偏高但历史分位口径一致",
         "涨跌停家数为样本池内|涨跌幅|>=9.5%的近似计数, 非全市场精确口径(未区分主板/创业板/ST)",
         "期权PCR仅覆盖实际可得区间(起点见 meta.source_coverage.option_pcr), 缺失日期不做前向填充",

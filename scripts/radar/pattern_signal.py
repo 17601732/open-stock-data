@@ -33,8 +33,12 @@ def _prepare(stock: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df = stock.copy()
     # TDX 原始日期是 YYYYMMDD 字符串, 统一成 YYYY-MM-DD 才能与指数/板块数据对齐
     df["date"] = pd.to_datetime(df["date"].astype(str), format="%Y%m%d").dt.strftime("%Y-%m-%d")
-    df = df.sort_values(["code", "date"], kind="mergesort")
-    g = df.groupby("code", sort=False)
+    # 唯一键用 market+code(symbol), 避免 sh000001/sz000001 这类跨市场同码碰撞
+    key = "symbol" if "symbol" in df.columns else "code"
+    if df.duplicated([key, "date"]).any():
+        raise ValueError(f"个股明细存在重复主键 {key}+date")
+    df = df.sort_values([key, "date"], kind="mergesort")
+    g = df.groupby(key, sort=False)
     # 均量用前 20 日(不含当日), 否则当日放量会抬高自身基准
     df["vol_ma"] = g["volume"].transform(
         lambda s: s.shift(1).rolling(w, min_periods=max(5, w // 2)).mean())
