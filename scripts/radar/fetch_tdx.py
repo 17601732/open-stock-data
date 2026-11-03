@@ -68,7 +68,7 @@ DETAIL_YEARS = 3           # 个股明细保留近 3 年(形态回测需要足�
 PARSE_VERSION = 5          # 解析口径版本: 证券类型白名单/volume 过滤/市场前缀主键变更时递增
 
 
-class PackageNotUpdated(RuntimeError):
+class PackageNotUpdatedError(RuntimeError):
     """包已下载但内容仍是上一交易日: 不落库、不覆盖快照, 等下一次 cron。"""
 
 DAY_DTYPE = np.dtype([
@@ -688,7 +688,7 @@ def fetch_tdx(force: bool = False, mode: str = "auto", all_segments: bool = True
                 note="包内最新交易日未到应到交易日, 本次不解析、不落库、不覆盖快照")
             logger.warning("package_not_updated: 包内最新交易日 %d < 应到交易日 %d, 不落库不覆盖快照",
                            latest, expected)
-            raise PackageNotUpdated(f"package_not_updated: {latest} < {expected}")
+            raise PackageNotUpdatedError(f"package_not_updated: {latest} < {expected}")
 
         prev = store.read_status().get("tdx", {})
         has_products = (store.DATA_DIR / "tdx_breadth.parquet").exists() and \
@@ -721,7 +721,7 @@ def fetch_tdx(force: bool = False, mode: str = "auto", all_segments: bool = True
             return breadth, store.read_frame("tdx_stock.parquet")
         # 冷启动/口径版本变更/产物缺失: 分段补历史(默认一次补完, 可断点续跑)
         return _staged(zp, t0, all_segments=all_segments, from_year=None, to_year=None)
-    except PackageNotUpdated:
+    except PackageNotUpdatedError:
         raise # 状态已标记为 package_not_updated, 不能被下面的 failed 覆盖
     except Exception as exc:
         store.update_status("tdx", status="failed", reason=str(exc)[:160])
