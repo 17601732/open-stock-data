@@ -24,6 +24,24 @@ def test_pcr_long_passthrough():
     assert _pcr_to_long(long).equals(long)
 
 
+def test_pcr_wide_with_total_fallback_recovers_pcr():
+    """只保留聚合列(put_vol_nan)的旧落盘行, 应能通过 TOTAL 兜底恢复总量 PCR。"""
+    from scripts.radar.fetch_inputs import _pcr_wide
+
+    broken = pd.DataFrame({
+        "date": ["2022-01-04", "2022-01-05"],
+        "put_vol_510050": [float("nan"), float("nan")],
+        "call_vol_510050": [float("nan"), float("nan")],
+        "put_vol_510300": [float("nan"), float("nan")],
+        "call_vol_510300": [float("nan"), float("nan")],
+        "put_vol_nan": [3.0, 6.0], "call_vol_nan": [10.0, 12.0],
+        "pcr": [float("nan"), float("nan")],
+    })
+    out = _pcr_wide(_pcr_to_long(broken))
+    assert out["pcr"].notna().all()
+    assert list(out["pcr"].round(4)) == [0.3, 0.5]
+
+
 def test_pcr_merge_wide_and_long_has_no_gap():
     """宽表旧数据 + 长表新数据合并后, 任一段都不应被清空(历史 PCR 断档回归测试)。"""
     old = pd.DataFrame({
