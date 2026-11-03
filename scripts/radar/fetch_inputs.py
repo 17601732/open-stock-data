@@ -391,24 +391,45 @@ def _pcr_to_long(df: pd.DataFrame) -> pd.DataFrame:
         if pc in df.columns and cc in df.columns:
             pieces.append(pd.DataFrame({
                 "date": df["date"], "underlying": u, "put_vol": df[pc], "call_vol": df[cc]}))
-    return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame(columns=cols)
+    if not pieces:
+        return pd.DataFrame(columns=cols)
+    long = pd.concat(pieces, ignore_index=True)
+    # 旧版 pivot 落盘时, 丢失分 ETF 列的行只剩聚合列(put_vol / put_vol_nan); 用 TOTAL 兜底
+    agg_cands = [c for c in ("put_vol", "put_vol_nan") if c in df.columns]
+    agg = max(agg_cands, key=lambda c: df[c].notna().sum()) if agg_cands else None
+    call_cands = [c for c in ("call_vol", "call_vol_nan") if c in df.columns]
+    agg_c = max(call_cands, key=lambda c: df[c].notna().sum()) if call_cands else None
+    if agg is not None and agg_c is not None:
+        have = long.groupby("date")["put_vol"].apply(lambda x: x.notna().any())
+        missing_dates = have.index[~have.to_numpy()]
+        if len(missing_dates):
+            sub = df[df["date"].isin(missing_dates)]
+            pieces.append(pd.DataFrame({
+                "date": sub["date"], "underlying": "TOTAL",
+                "put_vol": sub[agg], "call_vol": sub[agg_c]}))
+            long = pd.concat(pieces, ignore_index=True)
+    return long
 
 
 def _pcr_wide(long: pd.DataFrame) -> pd.DataFrame:
     """长表 → 宽表(含 pcr 与分 ETF 列), 宽表是唯一落盘格式。"""
     cols = ["put_vol_510050", "call_vol_510050", "put_vol_510300", "call_vol_510300"]
-    out = ["date", *cols, "put_vol", "call_vol", "pcr", "pcr_510050", "pcr_510300"]
+    out = ["date", *cols, "put_vol_TOTAL", "call_vol_TOTAL", "put_vol", "call_vol", "pcr",
+           "pcr_510050", "pcr_510300"]
     if long.empty:
         return pd.DataFrame(columns=out)
     long = long.drop_duplicates(["date", "underlying"], keep="last")
     wide = long.pivot(index="date", columns="underlying", values=["put_vol", "call_vol"])
     wide.columns = [f"{c[0]}_{c[1]}" for c in wide.columns]
     wide = wide.reset_index()
-    for c in cols:
+    for c in [*cols, "put_vol_TOTAL", "call_vol_TOTAL"]:
         if c not in wide.columns:
             wide[c] = float("nan")
     wide["put_vol"] = wide[["put_vol_510050", "put_vol_510300"]].sum(axis=1, min_count=1)
     wide["call_vol"] = wide[["call_vol_510050", "call_vol_510300"]].sum(axis=1, min_count=1)
+    # 分 ETF 列缺失的旧行用 TOTAL 聚合列补齐总量(分 ETF 的 pcr_510050/300 无法还原, 保持空)
+    wide["put_vol"] = wide["put_vol"].fillna(wide["put_vol_TOTAL"])
+    wide["call_vol"] = wide["call_vol"].fillna(wide["call_vol_TOTAL"])
     wide["pcr"] = wide["put_vol"] / wide["call_vol"]
     wide["pcr_510050"] = wide["put_vol_510050"] / wide["call_vol_510050"]
     wide["pcr_510300"] = wide["put_vol_510300"] / wide["call_vol_510300"]
