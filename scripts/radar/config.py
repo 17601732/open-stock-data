@@ -59,4 +59,19 @@ RADAR_CONFIG: dict = {
             {"label": "2024年初微盘股流动性危机(分布外)", "start": "2024-01-01", "end": "2024-06-30"},
         ],
     },
+    # 仅展示、不参与综合分的参考指标; 权重为 0, 不进入 composite.weights
+    "display": {
+        "trin_raw": {"name": "阿姆氏值TRIN(日频原始)", "group": "宽度", "unit": "比值",
+                     "note": "全市场口径(trin_2020_now.csv), 随行情大幅波动, 建议与30日均线对照"},
+        "pcr_chg5": {"name": "期权PCR 5日变化率", "group": "情绪", "unit": "%",
+                     "note": "PCR(5日均)的5日变化率, 变化方向比绝对水平更有参考价值"},
+        "breadth_ema5": {"name": "上涨家数占比EMA5", "group": "宽度", "unit": "%",
+                         "note": "样本池口径, 0-1 表示占比; 平滑短期噪声"},
+        "breadth_ema20": {"name": "上涨家数占比EMA20", "group": "宽度", "unit": "%",
+                          "note": "样本池口径, 中期扩散趋势"},
+        "nh_nl_ema5": {"name": "新高新低差EMA5", "group": "宽度", "unit": "家数",
+                       "note": "样本池口径, 短期动量"},
+        "nh_nl_ema20": {"name": "新高新低差EMA20", "group": "宽度", "unit": "家数",
+                        "note": "样本池口径, 中期趋势"},
+    },
 }

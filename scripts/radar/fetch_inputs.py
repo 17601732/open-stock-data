@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import akshare as ak
+import numpy as np
 import pandas as pd
 
 from scripts.radar import store
@@ -140,7 +141,6 @@ def _index_full_history(code: str) -> pd.DataFrame:
 
 def fetch_index_daily(full: bool = False) -> pd.DataFrame:
     """抓取沪深300与上证指数日线(新浪 → 腾讯回退), 增量补齐缺失日期。"""
-    existing = store.read_frame("index_daily.parquet")
     frames: list[pd.DataFrame] = []
     days = 1200 if full else 60
     for code in RADAR_CONFIG["index_codes"]:
@@ -170,10 +170,8 @@ def fetch_index_daily(full: bool = False) -> pd.DataFrame:
         if src is None:
             logger.error("指数 %s 全部来源失败: %s", code, last_err)
             continue
-        if not full and not existing.empty:
-            sub = existing[existing.code == code]
-            if not sub.empty:
-                src = src[src["date"] >= str(sub.date.max())]
+        # 增量保留整个 60 日窗口并 upsert: 不能只截取 >= 最新日期的行,
+        # 否则窗口内漏跑的交易日会被永久丢弃(连带 PCR 的交易日清单也缺这一天)
         frames.append(src)
 
     if frames:
@@ -250,9 +248,22 @@ def fetch_stock_daily(full: bool = False, workers: int = 8, limit: int | None = 
     last_dates = existing.groupby("code")["date"].max().to_dict() if not existing.empty else {}
 
     todo = []
+    # 以指数交易日为基准做缺口检测: 每只股票补齐「已有区间内的所有缺失交易日」,
+    # 而不是只看最后一天, 避免漏跑某天后中间日期永远补不回来
+    idx = store.read_frame("index_daily.parquet")
+    cal = sorted(idx.loc[idx.code == "000300", "date"].astype(str).unique()) if not idx.empty else []
+    have_map = (existing.groupby("code")["date"].apply(lambda s: set(s.astype(str)))
+                if not existing.empty else {})
+    first_dates = existing.groupby("code")["date"].min().astype(str).to_dict() if not existing.empty else {}
     for code in pool.code:
         if full or code not in done_codes:
             todo.append((code, HISTORY_START))
+            continue
+        have = have_map.get(code, set())
+        if cal:
+            gaps = [d for d in cal if d >= first_dates.get(code, HISTORY_START) and d not in have]
+            if gaps:
+                todo.append((code, gaps[0]))
         elif last_dates.get(code, "") < datetime.now().strftime("%Y-%m-%d"):
             nxt = (pd.Timestamp(last_dates[code]) + timedelta(days=1)).strftime("%Y-%m-%d")
             todo.append((code, nxt))
@@ -294,15 +305,26 @@ def fetch_stock_daily(full: bool = False, workers: int = 8, limit: int | None = 
 
 # ---------------------------------------------------------------- 两融 / 国债
 def fetch_margin() -> pd.DataFrame:
-    """抓取沪深两市融资融券余额并合计。"""
+    """抓取沪深两市融资融券数据并合计。
+
+    保留明细字段供 App 详情页使用:
+    存量(融资余额/融券余额/合计)、流量(融资买入额/融券卖出量)。
+    """
+    cols = {"融资余额": "fin_bal", "融资买入额": "fin_buy",
+            "融券余额": "short_bal", "融券卖出量": "short_sell_vol",
+            "融资融券余额": "total"}
     frames = []
     for fn, mkt in [(ak.macro_china_market_margin_sh, "sse"), (ak.macro_china_market_margin_sz, "szse")]:
         d = fn()
-        col = "融资融券余额" if "融资融券余额" in d.columns else d.columns[-1]
-        frames.append(pd.DataFrame({"date": pd.to_datetime(d["日期"]).dt.strftime("%Y-%m-%d"),
-                                    mkt: pd.to_numeric(d[col], errors="coerce")}))
+        f = pd.DataFrame({"date": pd.to_datetime(d["日期"]).dt.strftime("%Y-%m-%d")})
+        for src, dst in cols.items():
+            f[f"{mkt}_{dst}"] = pd.to_numeric(d[src], errors="coerce") if src in d.columns else np.nan
+        frames.append(f)
     m = frames[0].merge(frames[1], on="date", how="outer").sort_values("date")
-    m["total"] = m[["sse", "szse"]].sum(axis=1, min_count=1)
+    for dst in cols.values():
+        m[dst] = m[[f"sse_{dst}", f"szse_{dst}"]].sum(axis=1, min_count=1)
+    m["sse"] = m["sse_total"]
+    m["szse"] = m["szse_total"]
     m = m.dropna(subset=["total"]).reset_index(drop=True)
     store.upsert("margin_daily.parquet", m, ["date"])
     store.update_status("margin_daily", status="ok", start=str(m.date.min()), end=str(m.date.max()))

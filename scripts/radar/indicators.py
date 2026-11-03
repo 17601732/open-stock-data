@@ -57,6 +57,39 @@ def _pool_panel() -> pd.DataFrame:
     return df
 
 
+def trin_source_info() -> dict:
+    """TRIN 数据来源与缺口诊断(供快照元数据与 App 详情页提示)。
+
+    结论: trin_raw/trin_30d 复用仓库 trin_2020_now.csv, 该文件由
+    scripts/calc_trin_30d.py 从新浪「当日全市场快照」生成, 上游没有历史回溯接口,
+    因此历史缺失日无法任意补抓, 只能靠每日运行落库(次日开盘前运行可补回上一交易日)。
+    """
+    csv = _repo_trin()
+    idx = store.read_frame("index_daily.parquet")
+    info: dict = {
+        "key": "trin_raw",
+        "source": "trin_2020_now.csv (Sina 当日全市场快照)",
+        "recoverable": False,
+        "upstream": "Market_Center.getHQNodeData (snapshot only)",
+    }
+    if csv is None:
+        info.update({"status": "missing", "last_date": None, "missing_dates": [],
+                     "note": "TRIN CSV 不存在, 已退回样本池估算"})
+        return info
+    info["last_date"] = str(csv.index.max())[:10]
+    info["start_date"] = str(csv.index.min())[:10]
+    if not idx.empty:
+        cal = sorted({str(d)[:10] for d in pd.to_datetime(idx.loc[idx.code == "000300", "date"])})
+        have = {pd.Timestamp(d).strftime("%Y-%m-%d") for d in csv.index}
+        missing = [d for d in cal if info["start_date"] <= d <= cal[-1] and d not in have]
+        info["missing_dates"] = missing
+        info["status"] = "partial" if missing else "ok"
+    else:
+        info["missing_dates"] = []
+        info["status"] = "unknown"
+    return info
+
+
 def build_indicators() -> pd.DataFrame:
     """返回 index=date(交易日), 列=各指标原始值的 DataFrame。"""
     out: dict[str, pd.Series] = {}
@@ -99,17 +132,30 @@ def build_indicators() -> pd.DataFrame:
         nh = by.apply(lambda d: (d.close >= d.hi250).sum(), include_groups=False)
         nl = by.apply(lambda d: (d.close <= d.lo250).sum(), include_groups=False)
         out["nh_nl"] = nh - nl
+        out["nh_nl_ema5"] = out["nh_nl"].ewm(span=5, adjust=False).mean()
+        out["nh_nl_ema20"] = out["nh_nl"].ewm(span=20, adjust=False).mean()
+        breadth = adv / (adv + dec + EPS)
+        out["breadth_ema5"] = breadth.ewm(span=5, adjust=False).mean()
+        out["breadth_ema20"] = breadth.ewm(span=20, adjust=False).mean()
         zt = by.apply(lambda d: (d.pct_chg >= 9.5).sum(), include_groups=False)
         dt = by.apply(lambda d: (d.pct_chg <= -9.5).sum(), include_groups=False)
         out["limit_net"] = (zt - dt).rolling(5, min_periods=1).mean()
         out["pool_size"] = by.size()
 
     mar = store.read_frame("margin_daily.parquet")
-    if not mar.empty and not pool_cap.empty:
+    if not mar.empty:
         mar["date"] = pd.to_datetime(mar["date"])
-        m = mar.set_index("date")["total"].sort_index()
-        cap_al = pool_cap.reindex(pool_cap.index.union(m.index)).ffill().reindex(m.index)
-        out["margin_ratio"] = m / (cap_al + EPS)
+        mi = mar.set_index("date").sort_index()
+        if not pool_cap.empty and "total" in mi.columns:
+            m = mi["total"]
+            cap_al = pool_cap.reindex(pool_cap.index.union(m.index)).ffill().reindex(m.index)
+            out["margin_ratio"] = m / (cap_al + EPS)
+        # 详情页: 存量(融资余额/融券余额/两融合计) + 流量(融资买入额/融券卖出量)
+        for dst, src in {"margin_fin_bal": "fin_bal", "margin_short_bal": "short_bal",
+                         "margin_total": "total", "margin_fin_buy": "fin_buy",
+                         "margin_short_sell_vol": "short_sell_vol"}.items():
+            if src in mi.columns:
+                out[dst] = mi[src]
 
     idx = store.read_frame("index_daily.parquet")
     if not idx.empty:
@@ -124,7 +170,12 @@ def build_indicators() -> pd.DataFrame:
     pcr = store.read_frame("option_pcr_etf.csv")
     if not pcr.empty:
         pcr["date"] = pd.to_datetime(pcr["date"])
-        out["pcr_5d"] = pcr.set_index("date")["pcr"].sort_index().rolling(5, min_periods=1).mean()
+        p = pcr.set_index("date").sort_index()
+        out["pcr_5d"] = p["pcr"].rolling(5, min_periods=1).mean()
+        # 详情页需要的日频原始 PCR 与认购/认沽成交量(总量口径)
+        out["pcr_raw"] = p["pcr"]
+        out["pcr_call_vol"] = p["call_vol"] if "call_vol" in p.columns else np.nan
+        out["pcr_put_vol"] = p["put_vol"] if "put_vol" in p.columns else np.nan
 
     hc = store.read_frame("holder_change.parquet")
     if not hc.empty:
@@ -133,6 +184,12 @@ def build_indicators() -> pd.DataFrame:
         signed = pd.Series(np.where(inc, hc["value"].abs(), -hc["value"].abs()), index=hc.index)
         wk = signed.groupby(hc["date"]).sum().resample("W").sum()
         out["net_increase_20w"] = wk.rolling(20, min_periods=4).sum()
+        # 详情页日频明细(按公告日聚合, 单位: 万股 / 家)
+        out["holder_inc"] = hc[inc].groupby("date")["value"].sum()
+        out["holder_dec"] = hc[~inc].groupby("date")["value"].sum()
+        out["holder_net"] = out["holder_inc"].sub(out["holder_dec"], fill_value=0)
+        out["holder_inc_count"] = hc[inc].groupby("date")["code"].nunique()
+        out["holder_dec_count"] = hc[~inc].groupby("date")["code"].nunique()
 
     # 优先复用仓库既有全市场 TRIN(2020 起); 缺失时用上面的样本池估算
     repo_trin = _repo_trin()
@@ -153,13 +210,24 @@ def build_indicators() -> pd.DataFrame:
             idx.loc[idx.code == "000300", "date"]).unique()))
     df = df.reindex(trading.union(df.index)).sort_index()
     limits = {"hs300_pe": 62, "hs300_pb": 62, "alla_pe": 5, "erp": 0,
-              "net_increase_20w": 15, "pcr_5d": 8, "cn10y": 8}
+              "net_increase_20w": 15, "pcr_5d": 8, "cn10y": 8,
+              "holder_inc": 0, "holder_dec": 0, "holder_net": 0,
+              "holder_inc_count": 0, "holder_dec_count": 0,
+              "margin_fin_buy": 0, "margin_short_sell_vol": 0}
     for col in df.columns:
-        df[col] = df[col].ffill(limit=limits.get(col, 8))
+        limit = limits.get(col, 8)
+        if limit:
+            df[col] = df[col].ffill(limit=limit)
     df = df.reindex(trading)
+
+    # 增减持是流量: 无公告的交易日保持缺失, 不做 0 填充。
+    # 这样「当月无公告(无数据)」与「当月有公告但增持=减持(净额为零)」在聚合时才可区分。
 
     if "hs300_pe" in df.columns and "cn10y" in df.columns:
         df["erp"] = 1.0 / df["hs300_pe"] - df["cn10y"] / 100.0
+    if "pcr_5d" in df.columns:
+        # 展示项: 5日均PCR 的5日变化率(%), 比绝对水平更有参考价值
+        df["pcr_chg5"] = df["pcr_5d"].pct_change(5) * 100.0
     return df.drop(columns=["cn10y"], errors="ignore")
 
 
@@ -292,3 +360,58 @@ def weekly_history(ind: pd.DataFrame, keys: list[str], years: int = 10) -> dict:
         s = s.resample("W").last().dropna()
         out[key] = [[str(d.date()), round(float(v), 4)] for d, v in s.items()]
     return out
+
+
+def daily_history(ind: pd.DataFrame, keys: list[str]) -> dict:
+    """导出日频原始序列(共享日期轴 + 各指标等长数组), 供 App 图表缩放/平移使用。"""
+    if ind.empty:
+        return {}
+    dates = [str(d)[:10] for d in ind.index]
+    values = {}
+    for key in keys:
+        if key not in ind.columns:
+            continue
+        values[key] = [None if pd.isna(v) else round(float(v), 4) for v in ind[key].to_numpy()]
+    return {"dates": dates, "values": values,
+            "start": dates[0], "end": dates[-1], "note": "日频, 与 dates 等长; null=当日无有效值"}
+
+
+def score_diagnostics(comp: pd.DataFrame) -> pd.DataFrame:
+    """综合分的技术诊断: MACD(12,26,9) 与布林带(20, 2倍标准差)。仅展示, 不参与评分。"""
+    s = comp.set_index("date")["score"].astype(float)
+    dif = s.ewm(span=12, adjust=False).mean() - s.ewm(span=26, adjust=False).mean()
+    dea = dif.ewm(span=9, adjust=False).mean()
+    mid = s.rolling(20, min_periods=20).mean()
+    std = s.rolling(20, min_periods=20).std(ddof=0)
+    return pd.DataFrame({
+        "date": s.index,
+        "dif": dif.values,
+        "dea": dea.values,
+        "hist": (dif - dea).values * 2,
+        "boll_mid": mid.values,
+        "boll_up": (mid + 2 * std).values,
+        "boll_low": (mid - 2 * std).values,
+    })
+
+
+def confirm_signals(comp: pd.DataFrame, delay: int = 3) -> pd.DataFrame:
+    """实验项: 阈值触发后需连续 delay 个交易日仍处于同一区间, 才计入确认信号。"""
+    cfg = RADAR_CONFIG["composite"]
+    top, bottom = cfg["top_threshold"], cfg["bottom_threshold"]
+    s = comp.set_index("date")["score"].astype(float)
+    pos = {d: i for i, d in enumerate(s.index)}
+    events = extract_signals(comp)
+    rows = []
+    for _, e in events.iterrows():
+        j = pos.get(e["date"], -1) + delay
+        if j < 0 or j >= len(s):
+            continue
+        v = s.iloc[j]
+        if pd.isna(v):
+            continue
+        if (e["type"] == "top" and v >= top) or (e["type"] == "bottom" and v <= bottom):
+            rows.append({"date": str(e["date"])[:10],
+                         "confirmed_date": str(s.index[j])[:10],
+                         "type": e["type"], "score": round(float(e["score"]), 1),
+                         "score_confirmed": round(float(v), 1), "delay": delay})
+    return pd.DataFrame(rows)

@@ -44,6 +44,12 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
+      # TRIN 上游(新浪)只有当日全市场快照, 必须每天落库; 失败不阻塞快照, 但会在最后一步显式报错告警
+      - name: Update TRIN (Sina snapshot)
+        id: trin
+        continue-on-error: true
+        run: uv run python scripts/calc_trin_30d.py
+
       - name: Update radar inputs
         env:
           INPUT_FULL: ${{ github.event.inputs.full || 'false' }}
@@ -62,24 +68,36 @@ jobs:
           d = json.load(open('data/radar/snapshot.json'))
           pcr = d['indicator_history']['pcr_5d']
           cutoff = d['meta']['data_cutoff']
+          keys = {i['key'] for i in d['indicators']}
           assert len(d['indicators']) >= 15, f"indicators={len(d['indicators'])}"
+          assert 'trin_raw' in keys and 'trin_30d' in keys, f"TRIN 未进入指标列表: {sorted(keys)}"
+          assert 'trin_raw' in d['indicator_daily']['values'], "TRIN 日频序列缺失"
           assert len(pcr) >= 100 and pcr[-1][0] >= cutoff, f"pcr 序列疑似断档: {pcr[-1]} vs {cutoff}"
+          gaps = d['meta'].get('indicator_gaps', {})
           print('cutoff', cutoff, 'score', d['latest']['score'],
                 'indicators', len(d['indicators']), 'signals', len(d['signals']),
-                'pcr_weekly', len(pcr), pcr[-1])
+                'pcr_weekly', len(pcr), pcr[-1],
+                'trin_gap', gaps.get('trin_raw', {}).get('missing_dates', []))
           PY
 
       - name: Commit snapshot
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/radar/snapshot.json
+          git add data/radar/snapshot.json trin_2020_now.csv
           if git diff --cached --quiet; then
             echo "快照无变化, 跳过提交"
           else
             git commit -m "chore(radar): update snapshot $(date -u +%Y-%m-%d)"
             git push
           fi
+
+      # 快照已提交后再显式失败, 保证"数据照常更新 + 失败可被邮件通知"
+      - name: Notify TRIN failure
+        if: steps.trin.outcome != 'success'
+        run: |
+          echo "::error::TRIN 当日快照抓取失败, 缺口已写入 meta.indicator_gaps; 请检查新浪接口/runner 网络"
+          exit 1
 
       - name: Upload snapshot artifact
         uses: actions/upload-artifact@v4

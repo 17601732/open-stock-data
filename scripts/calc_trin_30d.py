@@ -4,9 +4,32 @@ import os
 import time
 import urllib.request
 import ast
-from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
+from datetime import datetime, timedelta, timezone
+
+
+def target_trade_date() -> str:
+    """确定快照对应的交易日。
+
+    新浪全市场接口只提供「当前快照」, 没有历史回溯能力, 因此日期必须由运行时刻推断:
+    - 环境变量 TARGET_DATE(YYYYMMDD/YYYY-MM-DD) 显式指定时优先使用(用于补跑当日)
+    - 北京时间 15:00 之后按当天; 15:00 之前或周末按上一交易日
+    GitHub cron 经常延迟数小时, 若直接用 wall clock 的日期, 延迟到次日凌晨会把
+    当日收盘快照错误标成新的一天, 从而漏掉真实交易日。
+    """
+    raw = (os.environ.get("TARGET_DATE") or "").strip()
+    if raw:
+        raw = raw.replace("-", "")
+        if len(raw) == 8 and raw.isdigit():
+            return f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
+    # 统一按 UTC+8 计算, 本机(北京时区)与 GitHub runner(UTC)结果一致
+    now = datetime.now(timezone.utc) + timedelta(hours=8)
+    day = now
+    if now.hour < 15:
+        day = now - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day.strftime("%Y-%m-%d")
+
 
 def fetch_today_data():
     print("开始抓取今日全市场快照...")
@@ -101,7 +124,15 @@ def update_csv_and_plot(date_str, up_count, down_count, up_vol, down_vol, trin_r
 
     print(f"✅ CSV 已更新。今日 TRIN: {trin_raw:.4f}")
 
-    # 5. 重新绘制图表
+    # 5. 重新绘制图表(可选: 未安装 matplotlib 时跳过, 不影响 CSV 落库)
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+    except Exception as exc:
+        print(f"跳过绘图(matplotlib 不可用): {exc}")
+        return
     print("🎨 正在重绘折线图...")
     dates = [datetime.strptime(r[0], "%Y-%m-%d") for r in rows]
     trin_raw_list = [float(r[5]) for r in rows]
@@ -127,17 +158,11 @@ def update_csv_and_plot(date_str, up_count, down_count, up_vol, down_vol, trin_r
     print("✅ 图表已更新。")
 
 if __name__ == "__main__":
-    # 获取当前最新交易日
-    now = datetime.now() + timedelta(hours=8)
-    latest_date = now.strftime("%Y-%m-%d")
-    
-    # 如果今天是周末，直接退出
-    if now.weekday() >= 5:
-        print("今天是周末，A股休市，跳过计算。")
-        exit(0)
-        
+    latest_date = target_trade_date()
+    print(f"目标交易日: {latest_date}")
+
     u_c, d_c, u_v, d_v, t_raw = fetch_today_data()
-    
+
     if u_c > 0 and d_c > 0:
         update_csv_and_plot(latest_date, u_c, d_c, u_v, d_v, t_raw)
     else:

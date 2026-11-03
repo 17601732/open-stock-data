@@ -20,7 +20,14 @@ import pandas as pd
 
 from scripts.radar import store
 from scripts.radar.config import RADAR_CONFIG
-from scripts.radar.indicators import weekly_history
+from scripts.radar.indicators import (
+    confirm_signals,
+    daily_history,
+    rolling_percentile,
+    score_diagnostics,
+    trin_source_info,
+    weekly_history,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -100,6 +107,7 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
     det = detail[pd.to_datetime(detail.date) == pd.Timestamp(latest_date)]
 
     indicators, missing = [], []
+    pcfg = RADAR_CONFIG["percentile"]
     for key, meta in weights.items():
         row = det[(det.key == key)]
         if row.empty or pd.isna(row.iloc[0]["pct"]):
@@ -108,12 +116,38 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
                             "reason": st.get("reason", "当日无有效值")})
             continue
         r = row.iloc[0]
+        vdate = None
+        if key in indicator_frame.columns:
+            s = indicator_frame[key].dropna()
+            vdate = str(s.index.max())[:10] if not s.empty else None
         indicators.append({
             "key": key, "name": meta["name"], "group": meta["group"],
             "weight": meta["weight"], "direction": meta["direction"],
             "value": None if pd.isna(r["raw"]) else round(float(r["raw"]), 4),
             "percentile": round(float(r["pct"]), 1),
             "oriented": round(float(r["oriented"]), 1),
+            "date": vdate, "scored": True,
+        })
+
+    # 仅展示的参考指标(权重 0, 不进入综合分)
+    display_cfg = RADAR_CONFIG.get("display", {})
+    for key, meta in display_cfg.items():
+        if key not in indicator_frame.columns:
+            continue
+        s = indicator_frame[key].dropna()
+        if s.empty:
+            continue
+        vdate = s.index.max()
+        pct_series = rolling_percentile(indicator_frame[key], pcfg["window_days"], pcfg["min_days"])
+        pv = pct_series.get(vdate)
+        indicators.append({
+            "key": key, "name": meta["name"], "group": meta["group"],
+            "weight": 0, "direction": "neutral", "scored": False,
+            "unit": meta.get("unit"), "note": meta.get("note"),
+            "value": round(float(s.iloc[-1]), 4),
+            "percentile": None if pv is None or pd.isna(pv) else round(float(pv), 1),
+            "oriented": None,
+            "date": str(vdate)[:10],
         })
 
     idx = store.read_frame("index_daily.parquet")
@@ -135,6 +169,26 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
         sig["date"] = pd.to_datetime(sig["date"]).dt.strftime("%Y-%m-%d")
         sig["score"] = sig["score"].round(1)
 
+    cf = confirm_signals(comp)
+    signals_confirmed = cf.to_dict("records") if len(cf) else []
+
+    ta = score_diagnostics(comp).copy()
+    ta["date"] = pd.to_datetime(ta["date"]).dt.strftime("%Y-%m-%d")
+    score_ta = {
+        "dates": ta["date"].tolist(),
+        "values": {c: [None if pd.isna(v) else round(float(v), 2) for v in ta[c]]
+                   for c in ["dif", "dea", "hist", "boll_mid", "boll_up", "boll_low"]},
+        "note": "MACD(12,26,9) 与布林带(20,2倍标准差)仅作拐点/背离参考, 不参与综合分",
+    }
+
+    detail_keys = ["pcr_raw", "pcr_call_vol", "pcr_put_vol",
+                   "margin_fin_bal", "margin_short_bal", "margin_total",
+                   "margin_fin_buy", "margin_short_sell_vol",
+                   "holder_inc", "holder_dec", "holder_net",
+                   "holder_inc_count", "holder_dec_count"]
+    hist_keys = list(weights) + list(RADAR_CONFIG.get("display", {})) + detail_keys
+    indicator_daily = daily_history(indicator_frame, hist_keys) if include_history else {}
+
     latest_close = px.iloc[-1] if len(px) else None
     score = float(latest["score"])
     zone = ("top" if score >= RADAR_CONFIG["composite"]["top_threshold"]
@@ -151,7 +205,17 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
         "个股使用不复权价格, 除权日附近MA60/52周高低点存在轻微断层",
         "分位为滚动十年窗口(不足十年用扩展窗口, 至少250个观测), 严格无未来函数",
         "回测为事件研究, 非交易策略回测; 2021年起为样本外",
+        "增减持明细按公告日聚合(公告日不等于增减持发生日); 无公告的交易日留空, 不做 0 填充, 聚合时「无公告」与「净额为零」可区分",
+        "两融明细口径: 融资余额/融券余额/合计为存量(周/月取期末值), 融资买入额/融券卖出量为流量(周/月求和), 两融余额占比为比率(周/月取均值)",
+        "TRIN 日频原始值等参考指标为展示项(权重 0), 不参与综合分; 综合分权重与阈值均未改动",
+        "TRIN 复用仓库 trin_2020_now.csv(新浪当日全市场快照), 上游无历史回溯接口; 缺口见 meta.indicator_gaps",
     ]
+
+    trin_info = trin_source_info()
+    indicator_gaps: dict[str, dict] = {}
+    if trin_info.get("missing_dates") or trin_info.get("status") != "ok":
+        indicator_gaps["trin_raw"] = trin_info
+        indicator_gaps["trin_30d"] = trin_info
 
     snapshot = {
         "meta": {
@@ -164,10 +228,13 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
             "breadth_check": _breadth_check(latest_date),
             "trading_calendar": "沪深300指数实际交易日",
             "missing_indicators": missing,
+            "indicator_gaps": indicator_gaps,
+            "trin_last_date": trin_info.get("last_date"),
             "anomalies": anomalies or [],
             "notes": notes,
+            "display_indicators": [{"key": k, **v} for k, v in RADAR_CONFIG.get("display", {}).items()],
             "snapshot_url": SNAPSHOT_URL,
-            "schema_version": 1,
+            "schema_version": 2,
         },
         "latest": {
             "date": latest_date,
@@ -186,6 +253,9 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
         "signals": sig.to_dict("records") if len(sig) else [],
         "backtest": backtest_result,
         "indicator_history": weekly_history(indicator_frame, list(weights)) if include_history else {},
+        "indicator_daily": indicator_daily,
+        "score_ta": score_ta,
+        "signals_confirmed": signals_confirmed,
     }
     return snapshot
 
