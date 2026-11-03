@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import shutil
 from typing import TYPE_CHECKING
@@ -46,6 +47,43 @@ def _missing_trading_dates(dates: list[str], reference: pd.Series | None = None)
         except Exception:
             expected = [str(d.date()) for d in pd.bdate_range(start, end)]
     return [d for d in expected if d not in have]
+
+
+def _gap_info(dates: list[str], reference: pd.Series | None) -> list[dict]:
+    """把相邻日期的大间隔区分成节假日正常休市 / 真实缺失。
+
+    以指数实际交易日为日历: 间隔内没有任何指数交易日 -> holiday; 有 -> missing 并列出缺失交易日。
+    """
+    sd = sorted(pd.Timestamp(d) for d in dates)
+    ref = sorted(pd.Timestamp(d) for d in reference.index) if reference is not None and len(reference) else []
+    out: list[dict] = []
+    for a, b in itertools.pairwise(sd):
+        days = (b - a).days
+        if days <= 3:
+            continue
+        between = [d for d in ref if a < d < b]
+        out.append({
+            "from": str(a.date()), "to": str(b.date()), "days": days,
+            "type": "missing" if between else "holiday",
+            "missing_sessions": [str(d.date()) for d in between],
+        })
+    return out
+
+
+def _breadth_check(date: str) -> dict | None:
+    """截止日涨跌家数一致性: 涨+跌+平必须等于有数据的样本数。"""
+    st = store.read_frame("stock_daily.parquet")
+    if st.empty:
+        return None
+    sub = st[pd.to_datetime(st["date"]) == pd.Timestamp(date)]
+    pct = pd.to_numeric(sub["pct_chg"], errors="coerce").dropna()
+    if pct.empty:
+        return None
+    up, down, flat = int((pct > 0).sum()), int((pct < 0).sum()), int((pct == 0).sum())
+    total = len(pct)
+    return {"date": date, "up": up, "down": down, "flat": flat, "total": total,
+            "sum_matches_total": up + down + flat == total,
+            "scope": "样本池(沪深300+中证500), 非全市场"}
 
 
 def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFrame,
@@ -103,6 +141,7 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
             else "bottom" if score <= RADAR_CONFIG["composite"]["bottom_threshold"] else "neutral")
 
     notes = [
+        "交易日历以沪深300指数实际交易日为准; meta.gap_info 中 holiday=节假日正常休市, missing=真实缺失",
         "宽度/TRIN/换手/涨跌停基于沪深300+中证500当前成分股固定样本池(约800只), 非全市场, 存在生存者偏差",
         "两融余额为沪深两市合计, 分母用样本池流通市值, 绝对水平偏高但历史分位口径一致",
         "涨跌停家数为样本池内|涨跌幅|>=9.5%的近似计数, 非全市场精确口径(未区分主板/创业板/ST)",
@@ -120,6 +159,9 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
             "latest_index_date": str(px.index.max())[:10] if len(px) else None,
             "source_coverage": status,
             "missing_dates": _missing_trading_dates(score_dates, px)[-60:],
+            "gap_info": _gap_info(score_dates, px),
+            "breadth_check": _breadth_check(latest_date),
+            "trading_calendar": "沪深300指数实际交易日",
             "missing_indicators": missing,
             "anomalies": anomalies or [],
             "notes": notes,

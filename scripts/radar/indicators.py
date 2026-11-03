@@ -190,7 +190,9 @@ def screen_anomalies(ind: pd.DataFrame, k: float = 12.0) -> tuple[pd.DataFrame, 
         s = ind[key].astype(float)
         if s.notna().sum() < 60:
             continue
-        diff = s.diff().abs()
+        # 按自然日间隔归一: 长假后的首日跳变不应被当成异常(否则会误删整段节后数据)
+        steps = pd.Series(s.index, index=s.index).diff().dt.days.fillna(1).clip(lower=1)
+        diff = s.diff().abs() / steps
         mad = diff.rolling(252, min_periods=40).median()
         level = s.abs().rolling(252, min_periods=40).median()
         mult = 20.0 if key in loose else k
