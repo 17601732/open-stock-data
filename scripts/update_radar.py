@@ -61,6 +61,8 @@ def run(full: bool = False, skip_stocks: bool = False, with_holders: bool = Fals
     bench = idx[idx.code == benchmark_code()].copy()
     bench["date"] = pd.to_datetime(bench["date"])
     px = bench.set_index("date")["close"].sort_index()
+    # 回测的价格序列同样截断到最后已完成交易日, 避免盘中未完成日进入前向收益
+    px = px.loc[:comp["date"].max()]
     bt = backtest.run_event_study(signals, px, detail)
 
     logger.info("4/4 导出快照")

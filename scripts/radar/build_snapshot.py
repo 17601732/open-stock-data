@@ -156,6 +156,8 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
         sub = idx[idx.code == "000300"].copy()
         sub["date"] = pd.to_datetime(sub["date"]).dt.strftime("%Y-%m-%d")
         px = sub.set_index("date")["close"].sort_index()
+        # 盘中抓到的当日指数日线尚未收盘, 不能当成最新收盘价(会与 data_cutoff 错位)
+        px = px.loc[:latest_date]
 
     series = pd.DataFrame({"date": comp["date"].astype(str).str[:10], "score": comp["score"].round(2)})
     if "raw_score" in comp.columns:
