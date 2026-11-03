@@ -18,6 +18,10 @@ on:
 jobs:
   update-radar:
     runs-on: ubuntu-latest
+    # 定时与手动触发共用同一份原始数据缓存, 串行执行避免缓存互相覆盖
+    concurrency:
+      group: update-radar
+      cancel-in-progress: false
     permissions:
       contents: write
 
@@ -53,7 +57,17 @@ jobs:
       - name: Verify snapshot
         run: |
           test -s data/radar/snapshot.json
-          uv run python -c "import json;d=json.load(open('data/radar/snapshot.json'));print('cutoff',d['meta']['data_cutoff'],'score',d['latest']['score'],'indicators',len(d['indicators']),'signals',len(d['signals']))"
+          uv run python - <<'PY'
+          import json
+          d = json.load(open('data/radar/snapshot.json'))
+          pcr = d['indicator_history']['pcr_5d']
+          cutoff = d['meta']['data_cutoff']
+          assert len(d['indicators']) >= 15, f"indicators={len(d['indicators'])}"
+          assert len(pcr) >= 100 and pcr[-1][0] >= cutoff, f"pcr 序列疑似断档: {pcr[-1]} vs {cutoff}"
+          print('cutoff', cutoff, 'score', d['latest']['score'],
+                'indicators', len(d['indicators']), 'signals', len(d['signals']),
+                'pcr_weekly', len(pcr), pcr[-1])
+          PY
 
       - name: Commit snapshot
         run: |
