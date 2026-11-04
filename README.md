@@ -84,15 +84,22 @@ uv run python -m scripts.backfill --market us --start-year 2023 --local-only
 | `update-bars-cn` | UTC 09:00 Mon-Fri | Fetch CN daily bars after market close |
 | `update-bars-hk` | UTC 09:00 Mon-Fri | Fetch HK daily bars after market close |
 | `update-bars-us` | UTC 22:00 Mon-Fri | Fetch US daily bars after market close |
-| `update-radar` | UTC 10:30 Mon-Fri | A-share top/bottom radar snapshot (see below) |
+| `update-radar` | UTC 11:00 / 14:00 / 23:00 Mon-Fri | A-share top/bottom radar snapshot (see below) |
 | `ci` | On push/PR | Lint (ruff) + test (pytest) |
 
 All workflows support `workflow_dispatch` for manual triggering.
 
+> **Ops note — schedules here are best-effort.** This repository is a fork, and scheduled
+> runs are observed to start **4–8 hours late** (2026-11-04: the 07:00 Beijing slot started
+> 10:54; the 16:10 slot started 00:11 the next day). Use cron as backfill, not as a clock:
+> for same-day data, prefer manual `workflow_dispatch` (Actions → *Update Radar Snapshot* →
+> *Run workflow*, ~13 minutes end-to-end).
+
 ## A-Share Top/Bottom Radar Snapshot
 
-`update-radar` runs every trading day at **UTC 10:30 (Beijing 18:30, after close)** and can be
-triggered manually (`workflow_dispatch`, inputs `full` / `with_holders`). It fetches incremental
+`update-radar` runs every trading day at **UTC 11:00 (Beijing 19:00, after close)**, with a
+**UTC 14:00 (Beijing 22:00)** fallback and a **UTC 23:00 (Beijing 07:00 next day)** catch-up;
+it can also be triggered manually (`workflow_dispatch`, inputs `full` / `with_holders`). It fetches incremental
 inputs, computes all indicators, the 0-100 composite score and the event-study backtest, then
 commits a single snapshot file:
 

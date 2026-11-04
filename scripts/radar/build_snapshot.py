@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 import logging
 import shutil
 from typing import TYPE_CHECKING
@@ -369,10 +370,26 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
     return snapshot
 
 
+def _json_safe(obj):
+    """递归把 NaN/Infinity 转成 None。
+
+    Android 端 org.json 遇到裸 NaN 会抛 "Forbidden numeric value: NaN",
+    整份快照都无法解析(实测 signals[].confirmed_date)。
+    """
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    return obj
+
+
 def write_snapshot(snapshot: dict, android_assets: Path | None = None) -> Path:
     """写入 data/radar/snapshot.json, 可选复制到 Android assets。"""
     path = store.ensure_dir() / "snapshot.json"
-    path.write_text(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    path.write_text(json.dumps(_json_safe(snapshot), ensure_ascii=False,
+                             separators=(",", ":"), allow_nan=False), encoding="utf-8")
     if android_assets:
         android_assets.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, android_assets / "snapshot.json")
