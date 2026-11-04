@@ -77,7 +77,7 @@ def _run_with_deadline(fn, timeout: float, name: str):
     def _target() -> None:
         try:
             box["value"] = fn()
-        except BaseException as exc:  # noqa: BLE001 - 原样抛回主线程
+        except BaseException as exc:  # 原样抛回主线程
             box["error"] = exc
 
     th = threading.Thread(target=_target, name=f"fetch-{name}", daemon=True)
@@ -264,7 +264,7 @@ def fetch_pool_symbols() -> pd.DataFrame:
             try:
                 frames.append(_pool_one(idx))
                 break
-            except Exception as exc:  # noqa: BLE001 - 超时/网络异常统一重试
+            except Exception as exc:  # 超时/网络异常统一重试
                 logger.warning("样本池 %s 第 %d/3 次抓取失败: %s", idx, attempt, str(exc)[:120])
                 if attempt < 3:
                     time.sleep(5)
