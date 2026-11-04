@@ -58,5 +58,6 @@ jobs:
           git config --global user.name 'GitHub Action'
           git config --global user.email 'action@github.com'
           git add option_pcr_50etf.csv data/radar/option_pcr_etf.csv
-          # 有变化才提交，没变化跳过，避免空提交报错
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update option PCR data" && git pull --rebase --autostash origin main && git push)
+          # 只看已暂存的变化: 缓存恢复会把 snapshot.json 等文件改成工作区脏状态,
+          # 用 `git diff --quiet` 会把这类无关改动当成"有变化", 进而空提交失败。
+          git diff --staged --quiet || (git commit -m "Update option PCR data" && git pull --rebase --autostash origin main && git push)
