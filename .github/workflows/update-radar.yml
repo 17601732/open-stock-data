@@ -60,7 +60,10 @@ jobs:
 
       # 通达信全量包 hsjday.zip(约 526MB)在 data/radar/tdx 下, 随上面的缓存一起恢复;
       # 解析产物(个股 3 年明细 ~82MB、逐日家数 0.26MB)也只在缓存里, 不入 git。
+      # 正常全量约 3-6 分钟; 25 分钟上限防止 akshare 无 timeout 的上游接口把 job 拖到 45 分钟被杀。
       - name: Update radar inputs
+        id: inputs
+        timeout-minutes: 25
         env:
           INPUT_FULL: ${{ github.event.inputs.full || 'false' }}
           INPUT_HOLDERS: ${{ github.event.inputs.with_holders || 'true' }}
@@ -132,11 +135,10 @@ jobs:
             git push
           fi
 
-      # 一次触发带齐 TRIN 与 PCR: 显式分发两个独立 workflow, Actions 页面能看到 3 个 run。
-      # 用 dispatch 而非 workflow_call, 因为 workflow_call 只会变成同一个 run 里的 job, 不满足
-      # 「三个 run 各自可见/可重跑」的要求; 失败也只需单独重跑那一个。
+      # 快照/校验失败时补跑 TRIN 与 PCR; 但被取消(含 job 超时)时不分发,
+      # 否则一次被杀的 run 仍会拉起两个下游 run(实测 run 41825543356)。
       - name: Dispatch TRIN and PCR workflows
-        if: always() # 快照/校验失败也要补跑 TRIN 与 PCR
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

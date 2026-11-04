@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -46,6 +47,47 @@ def _retry(fn, tries: int = 3, wait: int = 45):
                 continue
             raise
     raise last  # type: ignore[misc]
+
+
+# 单步硬超时: akshare 内部 HTTP 没有 timeout, 上游挂起会让整条流水线停住
+# (实测 2026-11-04 run 41825543356 卡在 pool 42 分钟, 直到 job 45 分钟上限被杀)。
+STEP_TIMEOUTS = {
+    "index_daily": 300,
+    "ex_rights": 300,
+    "tdx": 900,
+    "stock_daily": 900,
+    "pool": 180,
+    "boards": 300,
+    "bond_yield": 240,
+    "margin_daily": 240,
+    "valuation": 180,
+    "option_pcr": 600,
+    "holder_change": 1800,
+}
+DEFAULT_STEP_TIMEOUT = 600
+
+
+def _run_with_deadline(fn, timeout: float, name: str):
+    """在守护线程里执行 fn; 超过 timeout 抛 TimeoutError。
+
+    线程无法强杀, 但主流程不再被它阻塞(job 不会耗到 45 分钟上限)。
+    """
+    box: dict = {}
+
+    def _target() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - 原样抛回主线程
+            box["error"] = exc
+
+    th = threading.Thread(target=_target, name=f"fetch-{name}", daemon=True)
+    th.start()
+    th.join(timeout)
+    if th.is_alive():
+        raise TimeoutError(f"{name} 超过 {timeout:.0f}s 未返回(上游接口挂起)")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
 
 
 def _cn_symbol(code: str) -> str:
@@ -198,17 +240,44 @@ def _f(v) -> float | None:
 
 
 # ---------------------------------------------------------------- 样本池
+def _pool_one(idx: str) -> pd.DataFrame:
+    """单个指数成分股, 单次调用 180s 硬超时(csindex 接口偶发完全不返回)。"""
+    df = _run_with_deadline(lambda: ak.index_stock_cons_csindex(symbol=idx),
+                            STEP_TIMEOUTS["pool"], f"pool-{idx}")
+    return pd.DataFrame({
+        "code": df["成分券代码"].astype(str).str.zfill(6),
+        "name": df["成分券名称"],
+        "source_index": idx,
+    })
+
+
 def fetch_pool_symbols() -> pd.DataFrame:
-    """抓取沪深300 + 中证500 当前成分股作为固定样本池。"""
+    """抓取沪深300 + 中证500 当前成分股作为固定样本池。
+
+    成分股名单变化很慢: 接口超时/失败时重试 3 次, 仍失败则回退上次落盘的 pool.csv,
+    不因单日接口挂起而中断整条流水线。
+    """
+    cached = store.read_frame("pool.csv")
     frames = []
     for idx in RADAR_CONFIG["pool"]["index_codes"]:
-        df = ak.index_stock_cons_csindex(symbol=idx)
-        frames.append(pd.DataFrame({
-            "code": df["成分券代码"].astype(str).str.zfill(6),
-            "name": df["成分券名称"],
-            "source_index": idx,
-        }))
+        for attempt in range(1, 4):
+            try:
+                frames.append(_pool_one(idx))
+                break
+            except Exception as exc:  # noqa: BLE001 - 超时/网络异常统一重试
+                logger.warning("样本池 %s 第 %d/3 次抓取失败: %s", idx, attempt, str(exc)[:120])
+                if attempt < 3:
+                    time.sleep(5)
+        else:
+            if not cached.empty and "source_index" in cached.columns:
+                fallback = cached[cached["source_index"] == idx]
+                if not fallback.empty:
+                    logger.warning("样本池 %s 三次失败, 回退本地缓存 %d 只", idx, len(fallback))
+                    frames.append(fallback[["code", "name", "source_index"]])
+                    continue
+            raise RuntimeError(f"样本池 {idx} 三次抓取均失败, 且无本地缓存")
     pool = pd.concat(frames).drop_duplicates("code").reset_index(drop=True)
+
     store.write_frame("pool.csv", pool)
     snap_date = str(pd.Timestamp.now().date())
     store.update_status("pool", status="ok", count=len(pool), start=snap_date, end=snap_date,
@@ -795,7 +864,7 @@ def fetch_all(full: bool = False, with_holders: bool = False, skip_stocks: bool 
         t0 = time.time()
         logger.info("→ 抓取 %s", name)
         try:
-            fn()
+            _run_with_deadline(fn, STEP_TIMEOUTS.get(name, DEFAULT_STEP_TIMEOUT), name)
         except fetch_tdx.PackageNotUpdatedError:
             raise # 包未更新到应到交易日: 终止整条流水线, 不落库不覆盖快照
         except Exception as exc:
