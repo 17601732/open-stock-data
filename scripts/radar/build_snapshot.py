@@ -99,7 +99,7 @@ def _alt_display(alt: dict) -> list[dict]:
              if isinstance(v, dict) and v.get("stale")]
     if stale:
         for row in rows:
-            row["note"] = f"{row['note']}；{stale[0]}"
+            row["note"] = f"{row['note']}; {stale[0]}"
     return rows
 
 
