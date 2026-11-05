@@ -70,7 +70,8 @@ def _etf_daily(date: str) -> pd.DataFrame:
     df["date"] = date
     df["code"] = df["基金代码"].astype(str)
     df["shares"] = pd.to_numeric(df["基金份额"], errors="coerce")
-    return df[["date", "code", "shares"]].dropna()
+    df["src"] = "sse"
+    return df[["date", "code", "shares", "src"]].dropna(subset=["shares"])
 
 
 def _szse_snapshot(date: str) -> pd.DataFrame:
@@ -97,10 +98,36 @@ def _szse_snapshot(date: str) -> pd.DataFrame:
             d["当前规模(份)"].astype(str).str.replace(",", "", regex=False), errors="coerce")
         d = d[d["code"].isin(SZ_ETF)][["code", "shares"]].dropna()
         d["date"] = date
-        return d[["date", "code", "shares"]]
+        d["src"] = "szse"
+        return d[["date", "code", "shares", "src"]]
 
     got = _run(pull, 60)
     return got if isinstance(got, pd.DataFrame) else pd.DataFrame()
+
+
+def _em_shares(date: str) -> pd.DataFrame:
+    """深市份额兜底: 东方财富 push2 的 f84=总股本(ETF 即总份额, 单位份)。
+
+    深交所披露站 fund.szse.cn 在部分出口 IP(如 CI runner)会被 reset/超时, 只能兜底取
+    "当前值"; 该接口同样没有日期参数, 无法回补历史, 因此 20 日净申购仍需逐日累积。
+    """
+    def pull_one(code: str):
+        secid = ("1." if code.startswith("5") else "0.") + code
+
+        def _f():
+            u = (f"https://push2.eastmoney.com/api/qt/stock/get?secid={secid}"
+                 "&fields=f57,f84")
+            d = requests.get(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=15).json()
+            v = (d.get("data") or {}).get("f84")
+            return float(v) if v not in (None, "-", "") else None
+        return _run(_f, 20)
+
+    rows = []
+    for code in SZ_ETF:
+        v = pull_one(code)
+        if v is not None and np.isfinite(v) and v > 0:
+            rows.append({"date": date, "code": code, "shares": float(v), "src": "eastmoney"})
+    return pd.DataFrame(rows, columns=["date", "code", "shares", "src"])
 
 
 def etf_share_module(dates: list[str], lookback: int = 30) -> dict:
@@ -118,11 +145,16 @@ def etf_share_module(dates: list[str], lookback: int = 30) -> dict:
         got = _etf_daily(d)
         if not got.empty:
             rows.append(got)
-    # 深市只有当前快照: 每个运行日补一条(同一日期不重复抓)
+    if "src" not in cache.columns:
+        cache["src"] = np.nan
+    # 深市只有当前快照: 每个运行日补一条(同一日期不重复抓); 深交所站点不通时用东财 f84 兜底
     if dates:
         last = dates[-1]
         if not ((cache["code"].isin(SZ_ETF)) & (cache["date"].astype(str) == last)).any():
             got = _szse_snapshot(last)
+            if got.empty:
+                logger.warning("深交所份额快照不可得, 改用东方财富 f84 兜底(仅当前值)")
+                got = _em_shares(last)
             if not got.empty:
                 rows.append(got)
     if rows:
@@ -161,10 +193,12 @@ def etf_share_module(dates: list[str], lookback: int = 30) -> dict:
                                        if code in px_hist and len(px_hist[code]) else np.nan))
         d5 = sub.diff(5).iloc[-1]
         d20 = sub.diff(20).iloc[-1]
+        srcs = cache.loc[cache["code"] == code, "src"].dropna()
+        last_src = str(srcs.iloc[-1]) if len(srcs) else ""
         item = {
             "code": code, "name": name, "available": True, "shares": float(sub.iloc[-1]),
             "shares_date": str(sub.index[-1]),
-            "source": "szse" if code in SZ_ETF else "sse",
+            "source": last_src or ("szse" if code in SZ_ETF else "sse"),
         }
         if code in SZ_ETF:
             # 深市仅有当前份额快照: 累积够 21 个交易日之前, 20日净申购不可得(不做替代值)
@@ -192,9 +226,10 @@ def etf_share_module(dates: list[str], lookback: int = 30) -> dict:
     return {
         "available": True, "asof": latest, "items": items,
         "series": hist.tail(260).to_dict("records"),
-        "note": ("上交所 ETF 份额按日披露可取历史; 深交所 fund.szse.cn 只披露当前规模(份), "
-                 "已用 io.BytesIO 修复 akshare 的 bytes 报错, 但需逐日累积才可算净申购; "
-                 "20日净申购额 = 份额变化乘以收盘价(亿元), 取不到时标『数据不可得』"),
+        "note": ("上交所 ETF 份额按日披露可取历史; 深市仅披露当前规模(份), 证监会披露站 "
+                 "fund.szse.cn 在 CI 出口网络常被 reset, 已加东方财富 f84 兜底(仍只有当前值), "
+                 "故深市 20 日净申购需逐日累积, 未满 21 日标『数据不可得』; "
+                 "20日净申购额 = 份额变化乘以收盘价(亿元)"),
     }
 
 
