@@ -97,7 +97,9 @@ def _metrics(stock: pd.DataFrame, boards: pd.DataFrame, pcfg: dict) -> dict:
     ).reset_index()
     agg["up_ratio"] = agg["up"] / agg["valid"].replace(0, np.nan)
     agg["above60_ratio"] = agg["above"] / agg["above_n"].replace(0, np.nan)
-    agg["amount_share"] = agg["amount"] / agg["amount"].map(mkt_amount).replace(0, np.nan)
+    # agg 是 (date, board) 行: 要按行里的 date 映射全市场成交额, 不能按 amount 数值映射
+    # (旧写法 .map(mkt_amount) 会把数值当索引, 结果全是 NaN, 轮动的占比/拥挤度整列失效)
+    agg["amount_share"] = agg["amount"] / agg["date"].map(mkt_amount).replace(0, np.nan)
     agg["aw_ret"] = agg["ret_amt"] / agg["amount_ok"].replace(0, np.nan)
     agg["pattern_share"] = agg["pattern_hits"] / agg["valid"].replace(0, np.nan)
     return {"agg": agg, "boards": boards}
@@ -451,9 +453,16 @@ def _rotation_validation(eq: pd.DataFrame, mom20: pd.DataFrame) -> dict:
         }
     v20 = out.get("20d", {})
     valid = bool(v20.get("available", True) and v20.get("t") and abs(v20["t"]) >= 2)
-    out["verdict"] = ("横截面动量显著, 可参考" if valid and v20.get("mean_spread_pct", 0) > 0
-                      else "动量不显著" if not valid else "存在反转效应(强势跑输)")
-    out["display_only"] = not (valid and v20.get("mean_spread_pct", 0) > 0)
+    spread = v20.get("mean_spread_pct", 0) or 0
+    if valid and spread > 0:
+        out["verdict"] = "横截面动量显著(强跑赢), 可参考"
+    elif valid and spread < 0:
+        out["verdict"] = "存在显著反转效应(强势跑输)"
+    elif spread < 0:
+        out["verdict"] = "动量不显著, 方向偏反转(强势略跑输, |t|<2), 仅展示"
+    else:
+        out["verdict"] = "动量不显著, 仅展示"
+    out["display_only"] = not (valid and spread > 0)
     return out
 
 
