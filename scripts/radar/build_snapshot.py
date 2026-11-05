@@ -228,8 +228,12 @@ def _valuation_diag(detail: pd.DataFrame, px: pd.Series, weights: dict) -> dict:
         index="date", columns="key", values="oriented", aggfunc="last")
     if "hs300_pe" not in piv.columns or "erp" not in piv.columns:
         return {"available": False}
-    pairs = piv[vkeys].dropna()
-    pair = pairs[["hs300_pe", "erp"]]
+    # 每对残差用各自可得的完整样本(避免被最短的 alla_pe 截断)
+    pair = piv[["hs300_pe", "erp"]].dropna()
+    p_pb_erp = (piv[["hs300_pb", "erp"]].dropna() if "hs300_pb" in piv.columns else pair.iloc[0:0])
+    p_pb3 = (piv[["hs300_pb", "erp", "hs300_pe"]].dropna()
+             if "hs300_pb" in piv.columns else pair.iloc[0:0])
+    p_alla = (piv[["alla_pe", "erp"]].dropna() if "alla_pe" in piv.columns else pair.iloc[0:0])
     px = px.sort_index()
     ret60 = (px.shift(-60) / px - 1.0)
     ret60.index = pd.to_datetime(ret60.index)
@@ -247,13 +251,11 @@ def _valuation_diag(detail: pd.DataFrame, px: pd.Series, weights: dict) -> dict:
         std = float(ics.std())
         return {"n": len(df), "n_months": len(ics),
                 "ic": round(float(ics.mean()), 4),
-                "ic_ir": round(float(ics.mean() / std), 3) if std > 0 else None}
+                "ic_ir": round(float(ics.mean() / std), 3) if std > 0 else None,
+                "t": round(float(ics.mean() / std * np.sqrt(len(ics))), 2) if std > 0 else None}
 
     corr = float(pair["hs300_pe"].corr(pair["erp"]))
     spearman = float(pair["hs300_pe"].rank().corr(pair["erp"].rank()))
-    x = np.column_stack([np.ones(len(pair)), pair["erp"].to_numpy()])
-    beta, *_ = np.linalg.lstsq(x, pair["hs300_pe"].to_numpy(), rcond=None)
-    resid = pd.Series(pair["hs300_pe"].to_numpy() - x @ beta, index=pair.index)
     p1 = pair["hs300_pe"].tail(250)
 
     # 滚动正交残差: 104 周拟合 + 接下来 13 周样本外, 与 PE 同口径
@@ -294,26 +296,28 @@ def _valuation_diag(detail: pd.DataFrame, px: pd.Series, weights: dict) -> dict:
         },
         "ic_oos": {
             "pe": _ic(pair["hs300_pe"]),
-            "pb": _ic(pairs["hs300_pb"]) if "hs300_pb" in pairs.columns else {"ic": None},
-            "alla_pe": _ic(pairs["alla_pe"]) if "alla_pe" in pairs.columns else {"ic": None},
+            "pb": _ic(piv["hs300_pb"]) if "hs300_pb" in piv.columns else {"ic": None},
+            "alla_pe": _ic(piv["alla_pe"]) if "alla_pe" in piv.columns else {"ic": None},
             "erp": _ic(pair["erp"]),
-            "residual": _ic(resid),
-            "pb_residual_erp": (_ic_resid(pairs["hs300_pb"], ["erp"], pairs)
-                                if "hs300_pb" in pairs.columns else {"ic": None}),
-            "pb_residual_erp_pe": (_ic_resid(pairs["hs300_pb"], ["erp", "hs300_pe"], pairs)
-                                   if "hs300_pb" in pairs.columns else {"ic": None}),
-            "alla_residual_erp": (_ic_resid(pairs["alla_pe"], ["erp"], pairs)
-                                  if "alla_pe" in pairs.columns else {"ic": None}),
+            "residual": _ic_resid(piv["hs300_pe"], ["erp"], pair),
+            "pb_residual_erp": (_ic_resid(piv["hs300_pb"], ["erp"], p_pb_erp)
+                                if "hs300_pb" in piv.columns else {"ic": None}),
+            "pb_residual_erp_pe": (_ic_resid(piv["hs300_pb"], ["erp", "hs300_pe"], p_pb3)
+                                   if "hs300_pb" in piv.columns else {"ic": None}),
+            "alla_residual_erp": (_ic_resid(piv["alla_pe"], ["erp"], p_alla)
+                                  if "alla_pe" in piv.columns else {"ic": None}),
         },
-        "corr_pb_erp": (round(float(pairs["hs300_pb"].corr(pairs["erp"])), 3)
-                        if "hs300_pb" in pairs.columns else None),
-        "corr_pb_pe": (round(float(pairs["hs300_pb"].corr(pairs["hs300_pe"])), 3)
-                       if "hs300_pb" in pairs.columns else None),
+        "corr_pb_erp": (round(float(p_pb_erp["hs300_pb"].corr(p_pb_erp["erp"])), 3)
+                        if "hs300_pb" in piv.columns else None),
+        "corr_pb_pe": (round(float(p_pb3["hs300_pb"].corr(p_pb3["hs300_pe"])), 3)
+                       if "hs300_pb" in piv.columns else None),
+        "corr_alla_erp": (round(float(p_alla["alla_pe"].corr(p_alla["erp"])), 3)
+                          if "alla_pe" in piv.columns else None),
         "dailyized": bool(RADAR_CONFIG.get("valuation", {}).get("dailyize")),
-        "decision_note": ("PB 单独 IC_IR 与 PE 相当(60日约 -1.95), 与 ERP 相关 -0.947;"
+        "decision_note": ("PB 单独 IC_IR 与 PE 相当(60日约 -1.95), 与 ERP 强共线(|r|=0.91);"
                           "PB⊥ERP 残差 t=-2.20(|t|>1, 有独立信息), PB⊥(ERP,PE) t=-0.99;"
                           "V9(PB权重归0) 样本外 60日 IC -0.4078 劣于 V8 -0.4194, 故保留 PB 6 分权重;"
-                          "全A PE⊥ERP t=-0.35 独立信息不足, 未调权重(仅记录);"
+                          "PE⊥ERP 残差 t=-0.94; 全A PE⊥ERP t=-0.35 独立信息不足, 未调权重(仅记录);"
                           "PE 与 ERP 相关 0.88 已合并为单一估值维度, 总权重 22 分不变"),
     }
 
