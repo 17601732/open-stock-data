@@ -18,6 +18,7 @@ import math
 import shutil
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 from scripts.radar import alt_inputs, board_score, contrib, pattern_signal, store
@@ -193,6 +194,85 @@ def _breadth_check(date: str) -> dict | None:
             "scope": "样本池(沪深300+中证500), 非全市场"}
 
 
+def _daily_pct_payload(detail: pd.DataFrame, weights: dict, years: int = 10) -> dict:
+    """把 detail 里的日频分位(0-100)压成按日期对齐的整数序列, 供 App 回溯每日构成。"""
+    if detail is None or detail.empty:
+        return {"dates": [], "values": {}, "note": "无可用分位历史"}
+    d = detail.assign(date=pd.to_datetime(detail["date"]))
+    piv = d.pivot_table(index="date", columns="key", values="pct", aggfunc="last")
+    piv = piv[[k for k in weights if k in piv.columns]]
+    if piv.empty:
+        return {"dates": [], "values": {}, "note": "无可用分位历史"}
+    piv = piv[piv.index >= piv.index.max() - pd.Timedelta(days=365 * years)]
+    piv = piv.round(0).astype("Int64")
+    return {
+        "dates": [str(d.date()) for d in piv.index],
+        "values": {k: [None if pd.isna(v) else int(v) for v in piv[k]] for k in piv.columns},
+        "note": ("日频分位(0-100 整数, 滚动十年窗口, 因果计算); 可据此复算任意交易日的"
+                 "各指标分位/方向化/权重贡献, 不是用当前值代替历史"),
+    }
+
+
+def _valuation_diag(detail: pd.DataFrame, px: pd.Series, weights: dict) -> dict:
+    """估值维度诊断: PE 分位波动、与股债性价比共线、正交残差 IC。"""
+    vkeys = [k for k in ("hs300_pe", "hs300_pb", "alla_pe", "erp") if k in weights]
+    if detail is None or detail.empty or "hs300_pe" not in vkeys:
+        return {"available": False}
+    d = detail.assign(date=pd.to_datetime(detail["date"]))
+    piv = d[d["key"].isin(vkeys)].pivot_table(
+        index="date", columns="key", values="oriented", aggfunc="last")
+    if "hs300_pe" not in piv.columns or "erp" not in piv.columns:
+        return {"available": False}
+    pair = piv[["hs300_pe", "erp"]].dropna()
+    px = px.sort_index()
+    ret60 = (px.shift(-60) / px - 1.0)
+    ret60.index = pd.to_datetime(ret60.index)
+
+    def _ic(series: pd.Series) -> dict:
+        df = pd.DataFrame({"s": series, "f": ret60.reindex(series.index)}).dropna()
+        df = df[df.index >= pd.Timestamp("2021-01-01")]
+        if len(df) < 30:
+            return {"n": len(df), "ic": None}
+        ics = df.groupby(df.index.to_period("M")).apply(
+            lambda g: g["s"].rank().corr(g["f"].rank()) if len(g) >= 5 else np.nan)
+        ics = ics.dropna()
+        if ics.empty:
+            return {"n": len(df), "ic": None}
+        std = float(ics.std())
+        return {"n": int(len(df)), "n_months": int(len(ics)),
+                "ic": round(float(ics.mean()), 4),
+                "ic_ir": round(float(ics.mean() / std), 3) if std > 0 else None}
+
+    corr = float(pair["hs300_pe"].corr(pair["erp"]))
+    spearman = float(pair["hs300_pe"].rank().corr(pair["erp"].rank()))
+    x = np.column_stack([np.ones(len(pair)), pair["erp"].to_numpy()])
+    beta, *_ = np.linalg.lstsq(x, pair["hs300_pe"].to_numpy(), rcond=None)
+    resid = pd.Series(pair["hs300_pe"].to_numpy() - x @ beta, index=pair.index)
+    p1 = pair["hs300_pe"].tail(250)
+    val_total = sum(float(weights[k]) for k in vkeys)
+    total = sum(float(v["weight"]) for v in weights.values())
+    return {
+        "available": True,
+        "weight_share_pct": round(val_total / total * 100, 1),
+        "weight_sum": val_total,
+        "corr_pearson": round(corr, 3),
+        "corr_spearman": round(spearman, 3),
+        "r2": round(corr ** 2, 3),
+        "pe_pct_1y": {
+            "range": round(float(p1.max() - p1.min()), 1),
+            "std": round(float(p1.std()), 1),
+            "mean_abs_chg_20d": round(float(p1.diff(20).abs().dropna().mean()), 1),
+            "flat_share_pct": round(float((p1.diff() == 0).mean()) * 100, 1),
+        },
+        "ic_oos": {"pe": _ic(pair["hs300_pe"]), "erp": _ic(pair["erp"]),
+                   "residual": _ic(resid)},
+        "dailyized": bool(RADAR_CONFIG.get("valuation", {}).get("dailyize")),
+        "decision_note": ("PE 与 ERP 相关性>0.85, 合并为单一估值维度、上限维持 22 分"
+                          "(下调到15分样本外 IC 更差, 未改权重); PE/PB 月度源改为日频价格展开;"
+                          "20日均值平滑样本外略差, 默认关闭"),
+    }
+
+
 def _drivers(detail: pd.DataFrame, date: str, sig_type: str, limit: int = 5) -> list[dict]:
     """信号当日贡献最大的前 limit 个指标。
 
@@ -366,6 +446,8 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
                    "holder_inc_count", "holder_dec_count"]
     hist_keys = list(weights) + list(RADAR_CONFIG.get("display", {})) + detail_keys
     indicator_daily = daily_history(indicator_frame, hist_keys) if include_history else {}
+    daily_pct = _daily_pct_payload(detail, weights) if include_history else {}
+    valuation_diag = _valuation_diag(detail, px, weights)
 
     # ---- 指标边际贡献(滚动样本外, 描述性统计; 不据此重算权重) ----
     meta_lookup: dict[str, dict] = {k: dict(v) for k, v in weights.items()}
@@ -493,7 +575,7 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
             "ex_rights": status.get("ex_rights"),
             "ex_rights_flags": status.get("ex_rights_flags"),
             "snapshot_url": SNAPSHOT_URL,
-            "schema_version": 5,
+            "schema_version": 6,
         },
         "latest": {
             "date": latest_date,
@@ -515,6 +597,8 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
         "backtest": backtest_result,
         "indicator_history": weekly_history(indicator_frame, list(weights)) if include_history else {},
         "indicator_daily": indicator_daily,
+        "indicator_daily_pct": daily_pct,
+        "valuation_diag": valuation_diag,
         "score_ta": score_ta,
         "signals_confirmed": signals_confirmed,
         "pattern": pattern,

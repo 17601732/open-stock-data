@@ -24,6 +24,22 @@ TRIN_CSV = Path(__file__).resolve().parents[2] / "trin_2020_now.csv"
 logger = logging.getLogger(__name__)
 
 
+def _dailyize_value(raw: pd.Series, px: pd.Series) -> pd.Series:
+    """把月度估值(PE/PB)按指数涨跌展开到日频。
+
+    盈利锚仍是月度披露值(不编造日频盈利), 只让估值随价格逐日变动;
+    锚定日为原始月度数据的日期, 锚定日之间用 当日指数/锚定日指数 的比值缩放。
+    """
+    raw = raw.dropna().sort_index()
+    if raw.empty or px.empty:
+        return raw
+    anchor_px = px.reindex(raw.index).ffill()
+    anchor = pd.Series(raw.index.to_numpy(), index=raw.index).reindex(px.index, method="ffill")
+    out = anchor.map(raw) * px / anchor.map(anchor_px)
+    out[anchor.isna()] = np.nan
+    return out.dropna()
+
+
 def _repo_trin() -> pd.DataFrame | None:
     """复用仓库既有全市场 TRIN 产物(scripts/calc_trin_30d.py 每日更新 trin_2020_now.csv)。
 
@@ -146,6 +162,9 @@ def build_indicators() -> pd.DataFrame:
             if len(sub_pb):
                 out[f"{pre}_pb"] = sub_pb["pb"]
 
+    # 保留月度原始值, 后续按指数日收益展开为近似日频(需在 ffill 之前做)
+    monthly_val = {k: out[k].copy() for k in ("hs300_pe", "hs300_pb") if k in out}
+
     bond = store.read_frame("bond_yield.parquet")
     if not bond.empty:
         bond["date"] = pd.to_datetime(bond["date"])
@@ -267,6 +286,17 @@ def build_indicators() -> pd.DataFrame:
         trading = pd.DatetimeIndex(sorted(pd.to_datetime(
             idx.loc[idx.code == "000300", "date"]).unique()))
     df = df.reindex(trading.union(df.index)).sort_index()
+
+    # 月度 PE/PB → 近似日频: 盈利锚仍为月度披露值, 只随指数涨跌展开, 避免曲线长期一条直线。
+    vcfg = RADAR_CONFIG.get("valuation", {})
+    if vcfg.get("dailyize") and monthly_val and not idx.empty:
+        sub = idx[idx.code == "000300"].copy()
+        px = pd.Series(pd.to_numeric(sub["close"], errors="coerce").to_numpy(),
+                       index=pd.to_datetime(sub["date"])) if not sub.empty else pd.Series(dtype=float)
+        px = px[~px.index.duplicated(keep="last")].sort_index().dropna()
+        for col, ser in monthly_val.items():
+            df[col] = _dailyize_value(ser, px).reindex(df.index)
+
     limits = {"hs300_pe": 62, "hs300_pb": 62, "alla_pe": 5, "erp": 0,
               "net_increase_20w": 15, "pcr_5d": 8, "cn10y": 8,
               "holder_inc": 0, "holder_dec": 0, "holder_net": 0,
@@ -374,9 +404,29 @@ def build_composite(ind: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     ori = pd.DataFrame(oriented)
     w = pd.Series({k: m["weight"] for k, m in weights.items() if k in ori.columns})
-    avail = ori.notna()
-    cov = avail.mul(w, axis=1).sum(axis=1) / w.sum()
-    score = ori.fillna(0).mul(w, axis=1).sum(axis=1) / avail.mul(w, axis=1).sum(axis=1).replace(0, np.nan)
+    # 估值维度: (可选)平滑 + 合并为单一维度并受权重上限约束; 明细仍保留 4 个原始指标
+    score_ori = ori.copy()
+    score_w = w.copy()
+    vcfg = RADAR_CONFIG.get("valuation", {})
+    vkeys = [k for k in vcfg.get("keys", []) if k in score_ori.columns]
+    smooth = int(vcfg.get("smooth_days") or 0)
+    if smooth > 0:
+        for k in vkeys:
+            score_ori[k] = score_ori[k].rolling(
+                smooth, min_periods=max(2, smooth // 2)).mean()
+    if vcfg.get("merge") and len(vkeys) >= 2:
+        rel = pd.Series({k: float(w[k]) for k in vkeys}, dtype=float)
+        rel = rel / rel.sum()
+        merged = (score_ori[vkeys].mul(rel, axis=1).sum(axis=1) /
+                  score_ori[vkeys].notna().mul(rel, axis=1).sum(axis=1).replace(0, np.nan))
+        score_ori = score_ori.drop(columns=vkeys)
+        score_ori["_valuation"] = merged
+        score_w = pd.Series({k: float(v) for k, v in w.items() if k not in vkeys})
+        score_w["_valuation"] = min(float(w[vkeys].sum()), float(vcfg.get("cap_weight", 22)))
+    avail = score_ori.notna()
+    cov = avail.mul(score_w, axis=1).sum(axis=1) / score_w.sum()
+    score = score_ori.fillna(0).mul(score_w, axis=1).sum(axis=1) / \
+        avail.mul(score_w, axis=1).sum(axis=1).replace(0, np.nan)
     score = score.where(cov >= cfg["min_weight_coverage"])
     raw_score = score.copy()
 
@@ -421,6 +471,38 @@ def extract_signals(comp: pd.DataFrame) -> pd.DataFrame:
                 last["bottom"] = i
         prev = v
     return pd.DataFrame(events)
+
+
+def daily_percentile_history(ind: pd.DataFrame, keys: list[str], years: int = 10) -> dict:
+    """导出日频分位历史(整数化), 供 App 回溯任意交易日的分数构成。
+
+    只存分位(0-100, 四舍五入到整数), 权重/方向在 indicators 元数据里已有;
+    日增量约 16 个整数(约 60 字节), 十年存量约 150-200 KB。
+    """
+    pcfg = RADAR_CONFIG["percentile"]
+    start = ind.index.max() - pd.Timedelta(days=365 * years) if len(ind.index) else None
+    frames = {}
+    dates = None
+    for key in keys:
+        if key not in ind.columns:
+            continue
+        p = rolling_percentile(ind[key], pcfg["window_days"], pcfg["min_days"]).dropna()
+        if start is not None:
+            p = p[p.index >= start]
+        frames[key] = p.round(0).astype("Int64")
+        dates = p.index if dates is None else dates.union(p.index)
+    if dates is None:
+        return {"dates": [], "values": {}, "note": "无可用分位历史"}
+    dates = pd.DatetimeIndex(sorted(dates))
+    values = {}
+    for key, s in frames.items():
+        values[key] = [None if pd.isna(v) else int(v) for v in s.reindex(dates)]
+    return {
+        "dates": [str(d.date()) for d in dates],
+        "values": values,
+        "note": ("日频分位(0-100 整数, 滚动十年窗口, 因果计算); 可据此复算任意交易日的"
+                 "各指标分位/方向化/权重贡献, 不是用当前值代替历史"),
+    }
 
 
 def weekly_history(ind: pd.DataFrame, keys: list[str], years: int = 10) -> dict:

@@ -341,6 +341,122 @@ def _cross_section(score: pd.DataFrame, eq_ret: pd.DataFrame, dates: list, scfg:
     return out
 
 
+def _pad_pct(s: pd.Series, window: int = 252, min_days: int = 60) -> pd.Series:
+    """成交额占比的滚动分位(0-100), 用于拥挤度。"""
+    return s.rolling(window, min_periods=min_days).apply(
+        lambda a: float((a <= a[-1]).mean()) * 100.0, raw=True)
+
+
+def _rotation(comp: dict, score: pd.DataFrame, dates: list[str]) -> dict:
+    """板块相对强弱/轮动(不是顶底)。
+
+    RS = 板块等权指数 / 沪深300(同起点归一); 相对动量 = RS 的 20/60 日变化;
+    成交额占比变化与拥挤度(占比滚动分位)来自板块成交额。
+    """
+    idx = store.read_frame("index_daily.parquet")
+    eq = comp["_eq_index"].copy()
+    eq.index = pd.to_datetime([str(d)[:10] for d in eq.index])
+    if idx.empty or "000300" not in set(idx["code"]):
+        return {"available": False, "reason": "缺少沪深300指数日线"}
+    hs = idx[idx["code"] == "000300"].copy()
+    hs.index = pd.to_datetime(hs["date"])
+    hs = pd.to_numeric(hs["close"], errors="coerce").dropna().sort_index()
+    hs = hs[~hs.index.duplicated(keep="last")].reindex(eq.index).ffill()
+
+    base = eq.apply(lambda s: s.dropna().iloc[0] if s.notna().any() else np.nan)
+    eqn = eq.div(base, axis=1)
+    hsn = hs / hs.dropna().iloc[0]
+    rs = eqn.div(hsn, axis=0)
+    mom20 = (rs / rs.shift(20) - 1.0) * 100
+    mom60 = (rs / rs.shift(60) - 1.0) * 100
+
+    share = comp["amount_share"].copy()
+    share.index = eq.index
+    share_chg20 = (share - share.shift(20)) * 100  # 百分点
+    crowd = share.apply(_pad_pct)
+
+    last = -1
+    rows = []
+    for b in score.columns:
+        m20 = mom20[b].iloc[last]
+        m60 = mom60[b].iloc[last]
+        rows.append({
+            "board": b,
+            "rs": None if pd.isna(rs[b].iloc[last]) else round(float(rs[b].iloc[last]), 3),
+            "mom20": None if pd.isna(m20) else round(float(m20), 2),
+            "mom60": None if pd.isna(m60) else round(float(m60), 2),
+            "share": None if pd.isna(share[b].iloc[last]) else round(float(share[b].iloc[last]) * 100, 2),
+            "share_chg20": None if pd.isna(share_chg20[b].iloc[last]) else round(
+                float(share_chg20[b].iloc[last]), 2),
+            "crowding": None if pd.isna(crowd[b].iloc[last]) else round(float(crowd[b].iloc[last]), 1),
+            "quadrant": ("强强" if (m20 or 0) > 0 and (m60 or 0) > 0 else
+                         "强弱" if (m20 or 0) > 0 else
+                         "弱强" if (m60 or 0) > 0 else "弱弱")
+            if pd.notna(m20) and pd.notna(m60) else None,
+        })
+    # 相对强弱排名: 20/60 日动量的横截面秩平均
+    valid = [r for r in rows if r["mom20"] is not None and r["mom60"] is not None]
+    r20 = pd.Series({r["board"]: r["mom20"] for r in valid}).rank(pct=True)
+    r60 = pd.Series({r["board"]: r["mom60"] for r in valid}).rank(pct=True)
+    strength = (r20 + r60) / 2
+    for r in rows:
+        r["strength"] = None if r["board"] not in strength else round(
+            float(strength[r["board"]]), 3)
+    rows.sort(key=lambda r: (r["strength"] is None, -(r["strength"] or 0)))
+
+    validation = _rotation_validation(eq, mom20)
+    return {
+        "available": True,
+        "asof": dates[-1],
+        "rows": rows,
+        "strong": [r["board"] for r in rows[:3]],
+        "weak": [r["board"] for r in rows[-3:]],
+        "validation": validation,
+        "note": ("相对强弱/轮动(RS=板块等权指数/沪深300), 不是顶底; "
+                 "拥挤度=板块成交额占比的252日分位"),
+    }
+
+
+def _rotation_validation(eq: pd.DataFrame, mom20: pd.DataFrame) -> dict:
+    """横截面多前3空后3: 20/60 日前瞻超额、胜率、t 值; 同时检验反转效应。"""
+    out = {}
+    for h in (20, 60):
+        fwd = (eq.shift(-h) / eq - 1.0)
+        excess = fwd.sub(fwd.mean(axis=1), axis=0)
+        spreads, ics = [], []
+        for i in range(len(eq) - h):
+            m = mom20.iloc[i].dropna()
+            e = excess.iloc[i].dropna()
+            common = m.index.intersection(e.index)
+            if len(common) < 6:
+                continue
+            mm = m[common].sort_values()
+            top, bottom = mm.index[-3:], mm.index[:3]
+            spreads.append(float(e[top].mean() - e[bottom].mean()))
+            ics.append(float(m[common].rank().corr(e[common].rank())))
+        a = np.array(spreads)
+        if len(a) < 20:
+            out[f"{h}d"] = {"n": len(a), "available": False}
+            continue
+        n_eff = max(1, len(a) / h)
+        t = float(a.mean() / a.std(ddof=1) * np.sqrt(n_eff)) if a.std(ddof=1) > 0 else None
+        ic = np.array(ics)
+        out[f"{h}d"] = {
+            "n": len(a),
+            "mean_spread_pct": round(float(a.mean()) * 100, 2),
+            "win_rate": round(float((a > 0).mean()) * 100, 1),
+            "t": None if t is None else round(t, 2),
+            "mean_ic": round(float(ic.mean()), 3),
+            "ic_ir": round(float(ic.mean() / ic.std(ddof=1)), 2) if ic.std(ddof=1) > 0 else None,
+        }
+    v20 = out.get("20d", {})
+    valid = bool(v20.get("available", True) and v20.get("t") and abs(v20["t"]) >= 2)
+    out["verdict"] = ("横截面动量显著, 可参考" if valid and v20.get("mean_spread_pct", 0) > 0
+                      else "动量不显著" if not valid else "存在反转效应(强势跑输)")
+    out["display_only"] = not (valid and v20.get("mean_spread_pct", 0) > 0)
+    return out
+
+
 def build_board_module(include_history: bool = True) -> dict:
     """构建快照 boards 字段: 指标、评分、信号、逐板块验证与横截面检验。"""
     scfg = RADAR_CONFIG["board"]
@@ -423,6 +539,11 @@ def build_board_module(include_history: bool = True) -> dict:
     validation = _validate(score, eq_ret, scfg)
     validation["cross_section"] = _cross_section(score, eq_ret, list(score.index), scfg)
     validation["verdict"] = _verdict(validation, scfg)
+    try:
+        rotation = _rotation(comp, score, dates)
+    except Exception as exc:  # 轮动失败不应阻断顶底模块
+        logger.warning("板块轮动计算失败: %s", exc)
+        rotation = {"available": False, "reason": str(exc)[:160]}
 
     detail = {}
     detail_dates: list[str] = []
@@ -455,6 +576,7 @@ def build_board_module(include_history: bool = True) -> dict:
         "signals": all_signals[:150],
         "detail_dates": detail_dates,
         "detail": detail,
+        "rotation": rotation,
         "validation": validation,
     }
 

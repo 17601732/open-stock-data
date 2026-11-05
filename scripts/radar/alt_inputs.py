@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import threading
@@ -15,12 +16,17 @@ from pathlib import Path
 import akshare as ak
 import numpy as np
 import pandas as pd
+import requests
 
 logger = logging.getLogger(__name__)
 
 ALT_DIR = Path("data/radar/alt")
-WATCH_ETF = {"510300": "沪深300ETF", "510050": "上证50ETF", "510500": "中证500ETF",
-             "588000": "科创50ETF", "159919": "沪深300ETF(深)"}
+# 上交所: 份额按日披露且可取历史; 深交所: 只有"当前规模(份)"快照, 需逐日累积
+SH_ETF = {"510300": "沪深300ETF", "510050": "上证50ETF", "510500": "中证500ETF",
+          "510880": "红利ETF", "512100": "中证1000ETF", "588000": "科创50ETF"}
+SZ_ETF = {"159919": "沪深300ETF嘉实", "159915": "创业板ETF易方达",
+          "159901": "深证100ETF", "159922": "中证500ETF嘉实"}
+WATCH_ETF = {**SH_ETF, **SZ_ETF}
 INDEX_FOR = {"IF": "000300", "IH": "000016", "IC": "000905", "IM": "000852"}
 
 
@@ -56,25 +62,69 @@ def _save(df: pd.DataFrame, name: str) -> None:
 
 # ---------------------------------------------------------------- ETF 份额
 def _etf_daily(date: str) -> pd.DataFrame:
+    """上交所 ETF 份额: 接口支持指定日期, 可取历史。"""
     df = _run(lambda: ak.fund_etf_scale_sse(date=date.replace("-", "")), 90)
     if df is None or df.empty:
         return pd.DataFrame()
-    df = df[df["基金代码"].astype(str).isin(WATCH_ETF)].copy()
+    df = df[df["基金代码"].astype(str).isin(SH_ETF)].copy()
     df["date"] = date
     df["code"] = df["基金代码"].astype(str)
     df["shares"] = pd.to_numeric(df["基金份额"], errors="coerce")
     return df[["date", "code", "shares"]].dropna()
 
 
+def _szse_snapshot(date: str) -> pd.DataFrame:
+    """深交所 ETF 当前份额快照。
+
+    akshare 的 fund_etf_scale_szse 在 pandas 2.x 下把 bytes 直接传给 read_excel 会报
+    TypeError; 这里复刻请求并用 io.BytesIO 读取。该接口没有日期参数, 只披露"当前规模",
+    因此只能在每次运行时按当日累积, 无法回补历史。
+    """
+    url = "https://fund.szse.cn/api/report/ShowReport"
+    params = {"SHOWTYPE": "xlsx", "CATALOGID": "1000_lf", "TABKEY": "tab1",
+              "random": str(time.time())}
+    headers = {"Referer": "https://fund.szse.cn/marketdata/fundslist/index.html",
+               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                             "AppleWebKit/537.36 Chrome/120 Safari/537.36"}
+
+    def pull() -> pd.DataFrame:
+        r = requests.get(url, params=params, headers=headers, timeout=30)
+        r.raise_for_status()
+        d = pd.read_excel(io.BytesIO(r.content), engine="openpyxl",
+                          dtype={"基金代码": str})
+        d["code"] = d["基金代码"].astype(str).str.zfill(6)
+        d["shares"] = pd.to_numeric(
+            d["当前规模(份)"].astype(str).str.replace(",", "", regex=False), errors="coerce")
+        d = d[d["code"].isin(SZ_ETF)][["code", "shares"]].dropna()
+        d["date"] = date
+        return d[["date", "code", "shares"]]
+
+    got = _run(pull, 60)
+    return got if isinstance(got, pd.DataFrame) else pd.DataFrame()
+
+
 def etf_share_module(dates: list[str], lookback: int = 120) -> dict:
     cache = _load("etf_share.csv")
-    have = set(cache["date"].astype(str)) if not cache.empty else set()
-    todo = [d for d in dates[-lookback:] if d not in have][-120:]
+    have_by_date: dict[str, set[str]] = {}
+    if not cache.empty:
+        for d, g in cache.groupby(cache["date"].astype(str)):
+            have_by_date[str(d)] = set(g["code"].astype(str))
+    # 新加入 universe 的标的在旧缓存里没有记录, 因此按「该日是否集齐上交所标的」判断,
+    # 而不是只看日期是否出现过(深市仅当日快照, 不参与历史回补)。
     rows = []
+    todo = [d for d in dates[-lookback:]
+            if not set(SH_ETF).issubset(have_by_date.get(d, set()))][-120:]
     for d in todo:
         got = _etf_daily(d)
         if not got.empty:
             rows.append(got)
+    # 深市只有当前快照: 每个运行日补一条(同一日期不重复抓)
+    if dates:
+        last = dates[-1]
+        if not ((cache["code"].isin(SZ_ETF)) & (cache["date"].astype(str) == last)).any():
+            got = _szse_snapshot(last)
+            if not got.empty:
+                rows.append(got)
     if rows:
         cache = pd.concat([cache, *rows]).drop_duplicates(["date", "code"], keep="last")
         _save(cache, "etf_share.csv")
@@ -105,18 +155,34 @@ def etf_share_module(dates: list[str], lookback: int = 120) -> dict:
         sub = cache[cache["code"] == code].set_index("date")["shares"]
         if sub.empty:
             items.append({"code": code, "name": name, "available": False,
-                          "reason": "深市 159919 不在上交所份额接口内" if code == "159919" else "无数据"})
+                          "reason": "数据不可得(接口无返回)"})
             continue
         px = float(price.get(code) or (px_hist.get(code, pd.Series(dtype=float)).iloc[-1]
                                        if code in px_hist and len(px_hist[code]) else np.nan))
         d5 = sub.diff(5).iloc[-1]
         d20 = sub.diff(20).iloc[-1]
-        items.append({
+        item = {
             "code": code, "name": name, "available": True, "shares": float(sub.iloc[-1]),
-            "chg_5d": None if pd.isna(d5) else float(d5),
-            "chg_20d": None if pd.isna(d20) else float(d20),
-            "net_20d": None if pd.isna(d20) or not np.isfinite(px) else round(float(d20 * px) / 1e8, 2),
-        })
+            "shares_date": str(sub.index[-1]),
+            "source": "szse" if code in SZ_ETF else "sse",
+        }
+        if code in SZ_ETF:
+            # 深市仅有当前份额快照: 累积够 21 个交易日之前, 20日净申购不可得(不做替代值)
+            n_dates = int(sub.index.nunique())
+            if pd.isna(d20) or not np.isfinite(px):
+                item["net_20d"] = None
+                item["net_reason"] = f"数据不可得(深市仅当前份额快照, 已累积 {n_dates} 日)"
+            else:
+                item["net_20d"] = round(float(d20 * px) / 1e8, 2)
+                item["net_reason"] = f"深市按日累积口径(已累积 {n_dates} 日)"
+            item["chg_5d"] = None if pd.isna(d5) else float(d5)
+            item["chg_20d"] = None if pd.isna(d20) else float(d20)
+        else:
+            item["chg_5d"] = None if pd.isna(d5) else float(d5)
+            item["chg_20d"] = None if pd.isna(d20) else float(d20)
+            item["net_20d"] = (None if pd.isna(d20) or not np.isfinite(px)
+                               else round(float(d20 * px) / 1e8, 2))
+        items.append(item)
 
     piv = cache.pivot_table(index="date", columns="code", values="shares", aggfunc="last")
     net = piv.diff(20) * pd.DataFrame({c: px_hist.get(c, pd.Series(dtype=float))
@@ -126,8 +192,9 @@ def etf_share_module(dates: list[str], lookback: int = 120) -> dict:
     return {
         "available": True, "asof": latest, "items": items,
         "series": hist.tail(260).to_dict("records"),
-        "note": "上交所 ETF 份额(份, 交易所披露原值), 20日净申购额=份额变化乘以收盘价(亿元); "
-                "深市 159919 接口不可用, 该标的标记为缺",
+        "note": ("上交所 ETF 份额按日披露可取历史; 深交所 fund.szse.cn 只披露当前规模(份), "
+                 "已用 io.BytesIO 修复 akshare 的 bytes 报错, 但需逐日累积才可算净申购; "
+                 "20日净申购额 = 份额变化乘以收盘价(亿元), 取不到时标『数据不可得』"),
     }
 
 
