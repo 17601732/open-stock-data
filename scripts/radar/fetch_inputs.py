@@ -63,6 +63,7 @@ STEP_TIMEOUTS = {
     "valuation": 180,
     "option_pcr": 600,
     "holder_change": 1800,
+    "alt": 600,
 }
 DEFAULT_STEP_TIMEOUT = 600
 
@@ -837,6 +838,24 @@ def fetch_holder_change(full: bool = False) -> pd.DataFrame:
     return out
 
 
+def fetch_alt_inputs() -> dict:
+    """第二类数据: 宽基ETF份额 / 股指期货基差 / 期权IV与skew。
+
+    每个源独立失败不影响其它源; 取不到的源在 payload 里显式标 available=false。
+    """
+    from scripts.radar import alt_inputs
+
+    idx = store.read_frame("index_daily.parquet")
+    dates = sorted({str(d)[:10] for d in pd.to_datetime(idx["date"])}) if not idx.empty else []
+    payload = alt_inputs.build_alt_module(dates)
+    alt_inputs.save_payload(payload)
+    ok = {k: bool((payload.get(k) or {}).get("available"))
+          for k in ("etf_share", "futures_basis", "option_iv")}
+    store.update_status("alt", status="ok" if any(ok.values()) else "failed",
+                        sources=ok, asof=payload.get("asof"))
+    return payload
+
+
 def fetch_all(full: bool = False, with_holders: bool = False, skip_stocks: bool = False) -> dict:
     """按顺序抓取全部输入; 单源失败不影响其它源。"""
     started = datetime.now().isoformat(timespec="seconds")
@@ -853,6 +872,7 @@ def fetch_all(full: bool = False, with_holders: bool = False, skip_stocks: bool 
         ("bond_yield", fetch_bond_yield),
         ("margin_daily", fetch_margin),
         ("valuation", fetch_valuation),
+        ("alt", fetch_alt_inputs),
     ]
     if not skip_stocks:
         steps.insert(3, ("stock_daily", lambda: fetch_stock_daily(full)))

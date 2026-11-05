@@ -88,6 +88,12 @@ jobs:
           cutoff = d['meta']['data_cutoff']
           keys = {i['key'] for i in d['indicators']}
           assert len(d['indicators']) >= 15, f"indicators={len(d['indicators'])}"
+          ic = d.get('indicator_contributions') or {}
+          rows = ic.get('indicators') or []
+          assert len(rows) >= 20, f"贡献度表行数不足: {len(rows)}"
+          assert any(r.get('contribution_score') is not None for r in rows), "贡献度全为空"
+          alt = d.get('alt_indicators') or {}
+          assert 'alt_etf_net20' in {i['key'] for i in d['indicators']}, "第二类数据未进入指标列表"
           assert 'trin_raw' in keys and 'trin_30d' in keys, f"TRIN 未进入指标列表: {sorted(keys)}"
           assert 'trin_raw' in d['indicator_daily']['values'], "TRIN 日频序列缺失"
           assert len(pcr) >= 100 and pcr[-1][0] >= cutoff, f"pcr 序列疑似断档: {pcr[-1]} vs {cutoff}"

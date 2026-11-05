@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from scripts.radar import board_score, pattern_signal, store
+from scripts.radar import alt_inputs, board_score, contrib, pattern_signal, store
 from scripts.radar.config import RADAR_CONFIG
 from scripts.radar.indicators import (
     confirm_signals,
@@ -36,6 +36,94 @@ if TYPE_CHECKING:
 
 SNAPSHOT_URL = ("https://raw.githubusercontent.com/17601732/open-stock-data/main/data/radar/snapshot.json")
 logger = logging.getLogger(__name__)
+
+# 第二类数据(资金/波动)展示指标; 历史序列由自建缓存积累, 样本不足时只展示不评估贡献度
+ALT_INDICATORS = [
+    {"key": "alt_etf_net20", "name": "宽基ETF 20日净申购", "group": "资金", "unit": "亿元",
+     "direction": "hot_low", "note": "沪深宽基ETF份额20日变化乘以收盘价, 正=净申购; 深市159919不可得"},
+    {"key": "alt_if_basis", "name": "IF近月年化基差", "group": "资金", "unit": "%",
+     "direction": "hot_low", "note": "负值=贴水; 到期日按当月第三个周五估算"},
+    {"key": "alt_iv_50", "name": "50ETF ATM隐含波动率", "group": "波动", "unit": "%",
+     "direction": "hot_high", "note": "delta≈0.5 认购/认沽 IV 均值"},
+    {"key": "alt_skew_50", "name": "50ETF 25Δ偏斜(skew)", "group": "波动", "unit": "百分点",
+     "direction": "hot_low", "note": "25Δ认沽IV - 25Δ认购IV, 越高越恐慌"},
+]
+
+
+def _alt_series(alt: dict) -> dict[str, list[tuple[str, float]]]:
+    """把第二类数据模块转成 {指标key: [(date, value)]}。"""
+    out: dict[str, list[tuple[str, float]]] = {}
+    etf = alt.get("etf_share") or {}
+    if etf.get("available"):
+        out["alt_etf_net20"] = [(r["date"], r["value"]) for r in etf.get("series") or []
+                                if r.get("value") is not None]
+    basis = alt.get("futures_basis") or {}
+    if basis.get("available"):
+        out["alt_if_basis"] = [(r["date"], r["value"]) for r in basis.get("series") or []
+                               if r.get("value") is not None]
+    iv = alt.get("option_iv") or {}
+    if iv.get("available"):
+        out["alt_iv_50"] = [(r["date"], r.get("value")) for r in iv.get("series") or []
+                            if r.get("value") is not None]
+        out["alt_skew_50"] = [(r["date"], r.get("skew")) for r in iv.get("series") or []
+                              if r.get("skew") is not None]
+    return out
+
+
+def _alt_display(alt: dict) -> list[dict]:
+    """第二类数据指标行; 无数据时显式写"数据不可得", 不填替代值。"""
+    series = _alt_series(alt)
+    rows = []
+    for meta in ALT_INDICATORS:
+        s = series.get(meta["key"]) or []
+        vals = pd.Series([v for _, v in s], dtype=float).dropna()
+        row = {
+            "key": meta["key"], "name": meta["name"], "group": meta["group"],
+            "weight": 0, "direction": meta["direction"], "scored": False,
+            "unit": meta["unit"], "note": meta["note"], "alt": True,
+        }
+        if vals.empty:
+            row.update({"available": False, "value": None, "percentile": None,
+                        "date": None, "reason": "数据不可得", "percentile_basis": None})
+        else:
+            cur = float(vals.iloc[-1])
+            pct = round(float((vals <= cur).mean() * 100.0), 1) if len(vals) >= 30 else None
+            row.update({
+                "available": True, "value": round(cur, 4), "percentile": pct,
+                "date": s[-1][0],
+                "percentile_basis": f"自建样本(n={len(vals)})" if pct is not None else "样本不足",
+            })
+        rows.append(row)
+    return rows
+
+
+def _empty_contrib_row(key: str, name: str, group: str, reason: str,
+                       n_obs: int = 0) -> dict:
+    """无历史/样本不足指标的占位贡献度行(各字段显式 null, 不填替代值)。"""
+    null3 = {"20": None, "60": None, "120": None}
+    return {
+        "key": key, "name": name, "group": group,
+        "ic": dict(null3), "ic_ir": dict(null3), "ic_pos": dict(null3), "ic_t": dict(null3),
+        "orth_ic": dict(null3), "orth_t": dict(null3),
+        "loo_delta_hit": dict(null3), "loo_delta_ic": dict(null3), "loo_delta_maxdd": dict(null3),
+        "loo": {}, "n_windows": 0, "n_obs": n_obs,
+        "sample_start": None, "sample_end": None,
+        "redundant": None, "in_weights": False, "display_only": True,
+        "contribution_score": None, "insufficient_history": True, "reason": reason,
+    }
+
+
+def _alt_contribution_rows(series: dict) -> list[dict]:
+    """第二类指标按 A 的口径给出贡献度行; 样本不足(远少于 104 周)一律标 insufficient_history。"""
+    rows = []
+    for meta in ALT_INDICATORS:
+        s = series.get(meta["key"]) or []
+        row = _empty_contrib_row(meta["key"], meta["name"], meta["group"],
+                                 "自建样本不足 104 周, 无法做滚动样本外 IC/LOO(数据不可得或刚上线)", len(s))
+        if s:
+            row["sample_start"], row["sample_end"] = s[0][0], s[-1][0]
+        rows.append(row)
+    return rows
 
 
 def _missing_trading_dates(dates: list[str], reference: pd.Series | None = None) -> list[str]:
@@ -151,7 +239,8 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
                    include_history: bool = True,
                    anomalies: list[dict] | None = None,
                    tech: dict | None = None,
-                   abtest: dict | None = None) -> dict:
+                   abtest: dict | None = None,
+                   alt: dict | None = None) -> dict:
     """组装快照字典。"""
     weights = RADAR_CONFIG["composite"]["weights"]
     status = store.read_status()
@@ -204,6 +293,12 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
             "oriented": None,
             "date": str(vdate)[:10],
         })
+
+    # 第二类数据(ETF 份额/期货基差/期权 IV): 只展示, 不进入综合分; 无数据写"数据不可得"
+    alt = alt if alt is not None else alt_inputs.load_payload()
+    alt_rows = _alt_display(alt)
+    indicators.extend(alt_rows)
+    alt_series = _alt_series(alt)
 
     idx = store.read_frame("index_daily.parquet")
     px = pd.Series(dtype=float)
@@ -272,6 +367,60 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
     hist_keys = list(weights) + list(RADAR_CONFIG.get("display", {})) + detail_keys
     indicator_daily = daily_history(indicator_frame, hist_keys) if include_history else {}
 
+    # ---- 指标边际贡献(滚动样本外, 描述性统计; 不据此重算权重) ----
+    meta_lookup: dict[str, dict] = {k: dict(v) for k, v in weights.items()}
+    meta_lookup.update({k: dict(v) for k, v in RADAR_CONFIG.get("display", {}).items()})
+    meta_lookup.update({m["key"]: dict(m) for m in ALT_INDICATORS})
+    try:
+        hist_all = (weekly_history(indicator_frame,
+                                   list(weights) + list(RADAR_CONFIG.get("display", {})))
+                    if include_history else {})
+        weights_map = {k: float(v["weight"]) for k, v in weights.items()}
+        directions_map = {k: v["direction"] for k, v in weights.items()}
+        for k in RADAR_CONFIG.get("display", {}):
+            directions_map.setdefault(k, "hot_high")
+        contr = contrib.compute_contributions(
+            {"indicator_history": hist_all, "series": series.to_dict("records")},
+            weights_map, directions_map,
+            RADAR_CONFIG["composite"]["top_threshold"],
+            RADAR_CONFIG["composite"]["bottom_threshold"])
+        rows = contr.get("indicators") or []
+        for r in rows:
+            m = meta_lookup.get(r["key"], {})
+            r["name"] = m.get("name", r["key"])
+            r["group"] = m.get("group", "其他")
+            r["in_weights"] = r["key"] in weights
+            r["display_only"] = not r["in_weights"]
+            r["insufficient_history"] = bool(
+                r.get("n_windows", 0) == 0 and not (r.get("ic") or {}).get("60"))
+        covered = {r["key"] for r in rows} | {m["key"] for m in ALT_INDICATORS}
+        rows.extend(_alt_contribution_rows(alt_series))
+        for key, m in meta_lookup.items():
+            if key in covered:
+                continue
+            rows.append(_empty_contrib_row(key, m.get("name", key), m.get("group", "其他"),
+                                           "该指标无独立历史序列(仅当日展示值), 无法计算 IC/LOO"))
+            rows[-1]["in_weights"] = key in weights
+            rows[-1]["display_only"] = key not in weights
+        rows.sort(key=lambda r: (r["contribution_score"] is None,
+                                 -(r["contribution_score"] or 0.0)))
+        for i, r in enumerate(rows, 1):
+            r["rank"] = i
+        contrib_payload = {
+            "available": bool(rows),
+            "method": contr.get("method"),
+            "weighting": contr.get("weighting"),
+            "weight_change": "权重未动: 贡献度仅为描述性统计, 未用于重算 composite.weights",
+            "primary_horizon": contr.get("primary_horizon", 60),
+            "baseline": contr.get("baseline"),
+            "baseline_score_ic": contr.get("baseline_score_ic"),
+            "n_indicators": len(rows),
+            "indicators": rows,
+        }
+    except Exception as exc:
+        logger.warning("指标贡献度计算失败: %s", str(exc)[:160])
+        contrib_payload = {"available": False, "reason": str(exc)[:160], "indicators": []}
+
     latest_close = px.iloc[-1] if len(px) else None
     score = float(latest["score"])
     zone = ("top" if score >= RADAR_CONFIG["composite"]["top_threshold"]
@@ -298,6 +447,10 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
         "板块风险提醒只用行业板块(申万一级, 31 个, 覆盖沪深创业板/科创板约 88% 活跃个股, 不含北交所); "
         "题材/概念成分无干净且可回溯的数据源, 未提供",
         "板块形态为风险提示, 不参与综合分; 参数可在 App 内调整(只影响本地展示与阈值, 不改变历史统计口径)",
+        "指标贡献度为滚动样本外描述性统计(104周窗口/13周步长, 前瞻20/60/120交易日), "
+        "仅用于排序与展示, 未据此重算综合分权重(权重未动)",
+        "第二类数据(宽基ETF份额/股指期货基差/期权IV与skew)仅展示, 不进入综合分; "
+        "深市159919份额与中金所官方结算接口不可得, 均显式标注为数据不可得",
     ]
 
     try:
@@ -340,7 +493,7 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
             "ex_rights": status.get("ex_rights"),
             "ex_rights_flags": status.get("ex_rights_flags"),
             "snapshot_url": SNAPSHOT_URL,
-            "schema_version": 4,
+            "schema_version": 5,
         },
         "latest": {
             "date": latest_date,
@@ -355,6 +508,8 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
             "bottom": RADAR_CONFIG["composite"]["bottom_threshold"],
         },
         "indicators": indicators,
+        "indicator_contributions": contrib_payload,
+        "alt_indicators": alt,
         "series": series.to_dict("records"),
         "signals": sig.to_dict("records") if len(sig) else [],
         "backtest": backtest_result,
