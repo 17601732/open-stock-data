@@ -314,10 +314,10 @@ def _valuation_diag(detail: pd.DataFrame, px: pd.Series, weights: dict) -> dict:
         "corr_alla_erp": (round(float(p_alla["alla_pe"].corr(p_alla["erp"])), 3)
                           if "alla_pe" in piv.columns else None),
         "dailyized": bool(RADAR_CONFIG.get("valuation", {}).get("dailyize")),
-        "decision_note": ("PB 单独 IC_IR 与 PE 相当(60日约 -1.95), 与 ERP 强共线(|r|=0.91);"
-                          "PB⊥ERP 残差 t=-2.20(|t|>1, 有独立信息), PB⊥(ERP,PE) t=-0.99;"
+        "decision_note": ("PB 单独 IC_IR 与 PE 相当(60日约 -2.0), 与 ERP 强共线(|r|=0.93);"
+                          "PB⊥ERP 残差 t=-1.81(|t|>1, 有独立信息), PB⊥(ERP,PE) t=-1.82;"
                           "V9(PB权重归0) 样本外 60日 IC -0.4078 劣于 V8 -0.4194, 故保留 PB 6 分权重;"
-                          "PE⊥ERP 残差 t=-0.94; 全A PE⊥ERP t=-0.35 独立信息不足, 未调权重(仅记录);"
+                          "PE⊥ERP 残差 t=-0.21; 全A PE⊥ERP t=0.13 独立信息不足, 未调权重(仅记录);"
                           "PE 与 ERP 相关 0.88 已合并为单一估值维度, 总权重 22 分不变"),
     }
 
