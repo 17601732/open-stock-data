@@ -95,6 +95,11 @@ def _alt_display(alt: dict) -> list[dict]:
                 "percentile_basis": f"自建样本(n={len(vals)})" if pct is not None else "样本不足",
             })
         rows.append(row)
+    stale = [v.get("stale_note") for v in alt.values()
+             if isinstance(v, dict) and v.get("stale")]
+    if stale:
+        for row in rows:
+            row["note"] = f"{row['note']}；{stale[0]}"
     return rows
 
 
