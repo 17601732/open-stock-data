@@ -239,7 +239,7 @@ def _valuation_diag(detail: pd.DataFrame, px: pd.Series, weights: dict) -> dict:
         if ics.empty:
             return {"n": len(df), "ic": None}
         std = float(ics.std())
-        return {"n": int(len(df)), "n_months": int(len(ics)),
+        return {"n": len(df), "n_months": len(ics),
                 "ic": round(float(ics.mean()), 4),
                 "ic_ir": round(float(ics.mean() / std), 3) if std > 0 else None}
 
@@ -249,7 +249,7 @@ def _valuation_diag(detail: pd.DataFrame, px: pd.Series, weights: dict) -> dict:
     beta, *_ = np.linalg.lstsq(x, pair["hs300_pe"].to_numpy(), rcond=None)
     resid = pd.Series(pair["hs300_pe"].to_numpy() - x @ beta, index=pair.index)
     p1 = pair["hs300_pe"].tail(250)
-    val_total = sum(float(weights[k]) for k in vkeys)
+    val_total = sum(float(weights[k]["weight"]) for k in vkeys)
     total = sum(float(v["weight"]) for v in weights.values())
     return {
         "available": True,
