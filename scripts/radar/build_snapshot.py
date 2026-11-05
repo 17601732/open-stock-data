@@ -228,7 +228,8 @@ def _valuation_diag(detail: pd.DataFrame, px: pd.Series, weights: dict) -> dict:
         index="date", columns="key", values="oriented", aggfunc="last")
     if "hs300_pe" not in piv.columns or "erp" not in piv.columns:
         return {"available": False}
-    pair = piv[["hs300_pe", "erp"]].dropna()
+    pairs = piv[vkeys].dropna()
+    pair = pairs[["hs300_pe", "erp"]]
     px = px.sort_index()
     ret60 = (px.shift(-60) / px - 1.0)
     ret60.index = pd.to_datetime(ret60.index)
@@ -254,6 +255,28 @@ def _valuation_diag(detail: pd.DataFrame, px: pd.Series, weights: dict) -> dict:
     beta, *_ = np.linalg.lstsq(x, pair["hs300_pe"].to_numpy(), rcond=None)
     resid = pd.Series(pair["hs300_pe"].to_numpy() - x @ beta, index=pair.index)
     p1 = pair["hs300_pe"].tail(250)
+
+    # 滚动正交残差: 104 周拟合 + 接下来 13 周样本外, 与 PE 同口径
+    def _resid_oos(y: pd.Series, regs: list[str], pairs: pd.DataFrame) -> pd.Series:
+        w = pd.DataFrame({"y": y, **{k: pairs[k] for k in regs}}).resample("W-FRI").last().dropna()
+        out = pd.Series(np.nan, index=w.index)
+        for start in range(104, len(w) - 13, 13):
+            tr, te = w.iloc[start - 104:start], w.iloc[start:start + 13]
+            xx = np.column_stack([np.ones(len(tr))] + [tr[k].to_numpy() for k in regs])
+            bb, *_ = np.linalg.lstsq(xx, tr["y"].to_numpy(), rcond=None)
+            xt = np.column_stack([np.ones(len(te))] + [te[k].to_numpy() for k in regs])
+            out.iloc[start:start + 13] = te["y"].to_numpy() - xt @ bb
+        return out.dropna()
+
+    def _ic_resid(y: pd.Series, regs: list[str], pairs: pd.DataFrame) -> dict:
+        if y.name not in pairs.columns:
+            return {"ic": None}
+        s = _resid_oos(y, regs, pairs)
+        if len(s) < 100:
+            return {"n_week": len(s), "ic": None}
+        daily = s.reindex(piv.index, method="ffill")
+        return {**_ic(daily), "n_week": len(s)}
+
     val_total = sum(float(weights[k]["weight"]) for k in vkeys)
     total = sum(float(v["weight"]) for v in weights.values())
     return {
@@ -269,12 +292,29 @@ def _valuation_diag(detail: pd.DataFrame, px: pd.Series, weights: dict) -> dict:
             "mean_abs_chg_20d": round(float(p1.diff(20).abs().dropna().mean()), 1),
             "flat_share_pct": round(float((p1.diff() == 0).mean()) * 100, 1),
         },
-        "ic_oos": {"pe": _ic(pair["hs300_pe"]), "erp": _ic(pair["erp"]),
-                   "residual": _ic(resid)},
+        "ic_oos": {
+            "pe": _ic(pair["hs300_pe"]),
+            "pb": _ic(pairs["hs300_pb"]) if "hs300_pb" in pairs.columns else {"ic": None},
+            "alla_pe": _ic(pairs["alla_pe"]) if "alla_pe" in pairs.columns else {"ic": None},
+            "erp": _ic(pair["erp"]),
+            "residual": _ic(resid),
+            "pb_residual_erp": (_ic_resid(pairs["hs300_pb"], ["erp"], pairs)
+                                if "hs300_pb" in pairs.columns else {"ic": None}),
+            "pb_residual_erp_pe": (_ic_resid(pairs["hs300_pb"], ["erp", "hs300_pe"], pairs)
+                                   if "hs300_pb" in pairs.columns else {"ic": None}),
+            "alla_residual_erp": (_ic_resid(pairs["alla_pe"], ["erp"], pairs)
+                                  if "alla_pe" in pairs.columns else {"ic": None}),
+        },
+        "corr_pb_erp": (round(float(pairs["hs300_pb"].corr(pairs["erp"])), 3)
+                        if "hs300_pb" in pairs.columns else None),
+        "corr_pb_pe": (round(float(pairs["hs300_pb"].corr(pairs["hs300_pe"])), 3)
+                       if "hs300_pb" in pairs.columns else None),
         "dailyized": bool(RADAR_CONFIG.get("valuation", {}).get("dailyize")),
-        "decision_note": ("PE 与 ERP 相关性>0.85, 合并为单一估值维度、上限维持 22 分"
-                          "(下调到15分样本外 IC 更差, 未改权重); PE/PB 月度源改为日频价格展开;"
-                          "20日均值平滑样本外略差, 默认关闭"),
+        "decision_note": ("PB 单独 IC_IR 与 PE 相当(60日约 -1.95), 与 ERP 相关 -0.947;"
+                          "PB⊥ERP 残差 t=-2.20(|t|>1, 有独立信息), PB⊥(ERP,PE) t=-0.99;"
+                          "V9(PB权重归0) 样本外 60日 IC -0.4078 劣于 V8 -0.4194, 故保留 PB 6 分权重;"
+                          "全A PE⊥ERP t=-0.35 独立信息不足, 未调权重(仅记录);"
+                          "PE 与 ERP 相关 0.88 已合并为单一估值维度, 总权重 22 分不变"),
     }
 
 
