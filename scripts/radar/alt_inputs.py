@@ -63,7 +63,7 @@ def _save(df: pd.DataFrame, name: str) -> None:
 # ---------------------------------------------------------------- ETF 份额
 def _etf_daily(date: str) -> pd.DataFrame:
     """上交所 ETF 份额: 接口支持指定日期, 可取历史。"""
-    df = _run(lambda: ak.fund_etf_scale_sse(date=date.replace("-", "")), 90)
+    df = _run(lambda: ak.fund_etf_scale_sse(date=date.replace("-", "")), 25)
     if df is None or df.empty:
         return pd.DataFrame()
     df = df[df["基金代码"].astype(str).isin(SH_ETF)].copy()
@@ -103,7 +103,7 @@ def _szse_snapshot(date: str) -> pd.DataFrame:
     return got if isinstance(got, pd.DataFrame) else pd.DataFrame()
 
 
-def etf_share_module(dates: list[str], lookback: int = 120) -> dict:
+def etf_share_module(dates: list[str], lookback: int = 30) -> dict:
     cache = _load("etf_share.csv")
     have_by_date: dict[str, set[str]] = {}
     if not cache.empty:
@@ -362,12 +362,18 @@ def futures_basis_module(dates: list[str], lookback: int = 250) -> dict:
 
 def build_alt_module(dates: list[str]) -> dict:
     t0 = time.time()
-    etf = etf_share_module(dates)
-    basis = futures_basis_module(dates)
-    iv = option_iv_module(dates)
+    payload: dict = {"asof": dates[-1] if dates else None}
+    # 每个源完成即落盘: 单个源超时(如 IV 接口挂起)不会丢掉前面已抓到的 ETF/基差
+    for name, fn in (("etf_share", etf_share_module), ("futures_basis", futures_basis_module),
+                     ("option_iv", option_iv_module)):
+        try:
+            payload[name] = fn(dates)
+        except Exception as exc:
+            logger.warning("alt 子模块 %s 失败: %s", name, str(exc)[:160])
+            payload[name] = {"available": False, "reason": str(exc)[:120]}
+        save_payload(payload)
     logger.info("alt 数据模块完成, %.0fs", time.time() - t0)
-    return {"etf_share": etf, "futures_basis": basis, "option_iv": iv,
-            "asof": dates[-1] if dates else None}
+    return payload
 
 
 def save_payload(payload: dict) -> Path:

@@ -376,6 +376,15 @@ def build_snapshot(comp: pd.DataFrame, detail: pd.DataFrame, signals: pd.DataFra
 
     # 第二类数据(ETF 份额/期货基差/期权 IV): 只展示, 不进入综合分; 无数据写"数据不可得"
     alt = alt if alt is not None else alt_inputs.load_payload()
+    # 抓取步骤超时时会沿用缓存里的旧 payload; 显式标注, 避免把旧数据当成本次结果
+    alt_asof = str(alt.get("asof") or "")[:10]
+    if alt_asof and alt_asof != str(latest_date)[:10]:
+        alt = dict(alt)
+        for k in ("etf_share", "futures_basis", "option_iv"):
+            blk = dict(alt.get(k) or {})
+            blk["stale"] = True
+            blk["stale_note"] = f"本次抓取未更新, 沿用缓存 asof={alt_asof}(不等于最新交易日)"
+            alt[k] = blk
     alt_rows = _alt_display(alt)
     indicators.extend(alt_rows)
     alt_series = _alt_series(alt)

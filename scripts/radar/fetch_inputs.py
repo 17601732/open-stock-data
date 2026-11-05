@@ -63,7 +63,7 @@ STEP_TIMEOUTS = {
     "valuation": 180,
     "option_pcr": 600,
     "holder_change": 1800,
-    "alt": 600,
+    "alt": 900,
 }
 DEFAULT_STEP_TIMEOUT = 600
 
