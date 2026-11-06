@@ -183,6 +183,22 @@ def etf_share_module(dates: list[str], lookback: int = 30) -> dict:
             px_hist[code] = h.set_index("date")["收盘"].astype(float)
 
     items = []
+    # 先做份额/净申购的逐日矩阵(给 App 画多线图): 份额为亿份, 净申购为当日份额变化×收盘价(亿元)
+    piv = cache.pivot_table(index="date", columns="code", values="shares", aggfunc="last")
+    share_dates = [str(d) for d in piv.index]
+    px_df = pd.DataFrame({c: px_hist.get(c, pd.Series(dtype=float))
+                          for c in piv.columns}).reindex(piv.index)
+    net_daily = (piv.diff() * px_df) / 1e8
+
+    def _series(col: pd.Series) -> list:
+        out = []
+        for v in col.reindex(piv.index).tolist():
+            try:
+                out.append(None if v is None or not np.isfinite(float(v)) else round(float(v), 3))
+            except (TypeError, ValueError):
+                out.append(None)
+        return out
+
     for code, name in WATCH_ETF.items():
         sub = cache[cache["code"] == code].set_index("date")["shares"]
         if sub.empty:
@@ -216,15 +232,16 @@ def etf_share_module(dates: list[str], lookback: int = 30) -> dict:
             item["chg_20d"] = None if pd.isna(d20) else float(d20)
             item["net_20d"] = (None if pd.isna(d20) or not np.isfinite(px)
                                else round(float(d20 * px) / 1e8, 2))
+        if code in piv.columns:
+            item["shares_series"] = _series(piv[code] / 1e8)
+            item["net_series"] = _series(net_daily[code])
         items.append(item)
 
-    piv = cache.pivot_table(index="date", columns="code", values="shares", aggfunc="last")
-    net = piv.diff(20) * pd.DataFrame({c: px_hist.get(c, pd.Series(dtype=float))
-                                       for c in piv.columns})
-    series = net.sum(axis=1, min_count=1).dropna() / 1e8
-    hist = pd.DataFrame({"date": series.index, "value": series.round(2).values})
+    agg = (piv.diff(20) * px_df).sum(axis=1, min_count=1).dropna() / 1e8
+    hist = pd.DataFrame({"date": agg.index, "value": agg.round(2).values})
     return {
         "available": True, "asof": latest, "items": items,
+        "share_dates": share_dates,
         "series": hist.tail(260).to_dict("records"),
         "note": ("上交所 ETF 份额按日披露可取历史; 深市仅披露当前规模(份), 证监会披露站 "
                  "fund.szse.cn 在 CI 出口网络常被 reset, 已加东方财富 f84 兜底(仍只有当前值), "
